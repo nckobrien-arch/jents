@@ -1,0 +1,254 @@
+/*
+ * Jents Design System
+ * ===================
+ * Shared tokens and patterns for the Jents app (renderer/styles.css)
+ * and landing page (landing.html). Import or reference when building
+ * new pages or components.
+ *
+ * Usage: Both the app and landing page define tokens inline (in :root).
+ * This file is the canonical reference. When adding new tokens, add them
+ * here first, then copy into the consuming file.
+ */
+
+/* ============================================
+   1. COLOR TOKENS
+   ============================================ */
+
+:root {
+  /* --- Backgrounds --- */
+  --bg-base:        #0e0918;   /* Landing page base */
+  --bg-app:         #0c0c14;   /* App base (slightly different) */
+  --bg-card:        #130f20;   /* Card / elevated surface */
+  --bg-card-hover:  #1b1728;   /* Card hover state */
+  --bg-elevated:    #1a1a2e;   /* Modals, popovers (app) */
+  --bg-hover:       rgba(255, 255, 255, 0.04);  /* Generic hover overlay */
+
+  /* --- Borders --- */
+  --border:         rgba(255, 255, 255, 0.08);  /* Default border */
+  --border-hover:   rgba(255, 255, 255, 0.15);  /* Hovered / focused border */
+  --border-subtle:  rgba(255, 255, 255, 0.05);  /* Barely visible divider */
+
+  /* --- Text --- */
+  --text:           #e8e8f0;   /* Primary text (landing) */
+  --text-primary:   #e0e0ec;   /* Primary text (app) */
+  --text-secondary: #9090aa;   /* Descriptions, secondary info */
+  --text-dim:       #5a5a78;   /* Timestamps, hints */
+
+  /* --- Brand / Accent --- */
+  --accent:         #ff6b3d;   /* Primary accent (orange) */
+  --accent-glow:    rgba(255, 107, 61, 0.15);
+  --accent-soft:    rgba(255, 107, 61, 0.08);
+
+  /* --- Agent Colors --- */
+  --agent-blue:     #5b8def;   /* COS / OPS */
+  --agent-red:      #ef6b6b;   /* CFO / FIN */
+  --agent-green:    #6befa0;   /* CMO / MKT */
+  --agent-purple:   #a06bef;   /* PM */
+  --agent-amber:    #f59e0b;   /* DROP / ENG */
+
+  /* --- Semantic Colors --- */
+  --green:          #34d399;   /* Success, running */
+  --blue:           #60a5fa;   /* Info, links */
+  --purple:         #a78bfa;   /* Branding accent */
+  --yellow:         #fbbf24;   /* Warning */
+  --red:            #f87171;   /* Error, danger */
+}
+
+
+/* ============================================
+   2. TYPOGRAPHY
+   ============================================ */
+
+:root {
+  /* --- Font Stacks --- */
+  --font-ui:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono:  'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  --font-brand: 'Roboto Slab', Georgia, serif;  /* Logo wordmark only */
+
+  /* --- Font Sizes (app) --- */
+  --text-xs:  11px;
+  --text-sm:  12px;
+  --text-md:  13px;   /* Default body in app */
+  --text-lg:  14px;
+  --text-xl:  16px;
+
+  /* --- Font Sizes (landing page) --- */
+  /* Hero h1:        72px (desktop) / 36px (mobile) */
+  /* Section title:  48px (desktop) / 28px (mobile) */
+  /* Body:           16px */
+  /* Small:          13-14px */
+  /* Tiny:           11-12px */
+}
+
+
+/* ============================================
+   3. SPACING & LAYOUT
+   ============================================ */
+
+:root {
+  /* --- Radius --- */
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  12px;
+  --radius-xl:  16px;
+
+  /* --- Transitions --- */
+  --transition-fast: 0.15s ease;
+  --transition-base: 0.2s ease;
+  --transition-slow: 0.3s ease;
+
+  /* --- Content widths (landing) --- */
+  --max-w:          1120px;   /* Main container */
+  --max-w-narrow:   720px;    /* FAQ, manifesto */
+  --max-w-feature:  960px;    /* Feature groups, grids */
+
+  /* --- App layout --- */
+  --sidebar-w:  232px;
+  --panel-w:    320px;        /* Right panels (logs, files, channels) */
+  --toolbar-h:  44px;
+}
+
+
+/* ============================================
+   4. COMPONENT PATTERNS
+   ============================================ */
+
+/* --- Card ---
+   Used in: starter packs, persona cards, shortcut items, FAQ items
+   .card {
+     padding: 24px;
+     border-radius: var(--radius-xl);
+     background: var(--bg-card);
+     border: 1px solid var(--border);
+     transition: all var(--transition-slow);
+   }
+   .card:hover {
+     border-color: var(--border-hover);
+     transform: translateY(-2px);
+     box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+   }
+*/
+
+/* --- Badge / Pill ---
+   .badge {
+     display: inline-flex;
+     align-items: center;
+     gap: 8px;
+     padding: 6px 16px;
+     border-radius: 99px;
+     font-size: 13px;
+     font-weight: 600;
+   }
+   Variants:
+     accent:  bg: var(--accent-soft), border: rgba(255,107,61,0.2), color: var(--accent)
+     neutral: bg: rgba(255,255,255,0.04), border: rgba(255,255,255,0.12), color: var(--text)
+*/
+
+/* --- Button (primary) ---
+   .btn-primary {
+     padding: 14px 32px;
+     border-radius: var(--radius-lg);
+     background: var(--accent);
+     color: white;
+     font-size: 16px;
+     font-weight: 600;
+   }
+   Hover: filter: brightness(1.15); box-shadow with accent-glow; translateY(-1px)
+*/
+
+/* --- Button (secondary / ghost) ---
+   .btn-secondary {
+     padding: 14px 32px;
+     border-radius: var(--radius-lg);
+     background: transparent;
+     border: 1px solid var(--border-hover);
+     color: var(--text);
+     font-size: 16px;
+     font-weight: 600;
+   }
+   Hover: bg: var(--bg-hover); border lightens
+*/
+
+/* --- Section Header ---
+   .section-label: 13px, uppercase, letter-spacing 2px, accent color
+   .section-title: 48px, weight 800, gradient text (white -> secondary)
+   .section-sub:   18px, secondary text, max-width 600px, centered
+*/
+
+/* --- Toolbar Button (app) ---
+   28x28, border-radius var(--radius-sm), transparent bg
+   SVG icons: 16x16, stroke: currentColor, fill: none, stroke-width: 2
+   Hover: bg: var(--bg-hover), color: var(--text-primary)
+   Active: color: var(--accent)
+*/
+
+
+/* ============================================
+   5. SHADOWS & EFFECTS
+   ============================================ */
+
+/*
+   Elevation 1 (cards):    0 8px 32px rgba(0,0,0,0.3)
+   Elevation 2 (modals):   0 24px 80px rgba(0,0,0,0.6)
+   Elevation 3 (hero):     0 32px 80px rgba(0,0,0,0.5)
+   Glow (accent):          0 0 30px var(--accent-glow)
+   Inset border:           0 0 0 1px rgba(255,255,255,0.04) inset
+*/
+
+
+/* ============================================
+   6. ANIMATION PATTERNS
+   ============================================ */
+
+/*
+   fade-up:     opacity 0 -> 1, translateY(24px -> 0), 0.6s cubic-bezier(0.4,0,0.2,1)
+   pulse:       opacity 1 -> 0.4 -> 1, 2s ease infinite (status dots)
+   keypress:    scale(1) -> scale(0.9) translateY(2px) -> scale(1), 0.3s ease
+   slideIn:     translateX(100%) -> 0  (panels)
+   composerIn:  opacity + scale from bottom  (composer overlay)
+*/
+
+
+/* ============================================
+   7. BREAKPOINTS
+   ============================================ */
+
+/*
+   Desktop:     > 768px  (default styles)
+   Tablet:      <= 768px (single column, hide nav links, reduce fonts)
+   Phone:       <= 480px (starter grid 1-col, smaller hero text)
+
+   Key responsive changes at 768px:
+     - Container padding: 32px -> 20px
+     - Hero h1: 72px -> 36px
+     - Section titles: 48px -> 28px
+     - Feature groups: 2-col -> 1-col
+     - Nav links hidden, hamburger shown
+     - Grids collapse to 1-col
+     - Section padding: 120px -> 80px
+*/
+
+
+/* ============================================
+   8. LOGO
+   ============================================ */
+
+/*
+   Five dots in a plus/cross pattern:
+     Top-left:     var(--agent-blue)    #5b8def
+     Top-right:    var(--agent-green)   #6befa0
+     Bottom-left:  var(--agent-purple)  #a06bef
+     Bottom-right: var(--agent-red)     #ef6b6b
+     Center:       var(--accent)        #ff6b3d  (slightly larger)
+
+   SVG (20x20 viewbox):
+     <svg viewBox="0 0 20 20">
+       <circle cx="6" cy="6" r="3" fill="#5b8def"/>
+       <circle cx="14" cy="6" r="3" fill="#6befa0"/>
+       <circle cx="6" cy="14" r="3" fill="#a06bef"/>
+       <circle cx="14" cy="14" r="3" fill="#ef6b6b"/>
+       <circle cx="10" cy="10" r="4" fill="#ff6b3d"/>
+     </svg>
+
+   Wordmark: "jents" in --font-brand, bold italic, lowercase, letter-spacing -1px
+*/
