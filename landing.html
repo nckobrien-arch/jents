@@ -9,6 +9,13 @@
   <meta property="og:description" content="One window. Five agents. Zero lost threads. Run Claude Code with desktop superpowers.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://jents.co">
+  <meta property="og:image" content="https://jents.co/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Jents - AI Agent Terminal for macOS">
+  <meta name="twitter:description" content="One window. Five agents. Zero lost threads. Run Claude Code with desktop superpowers.">
+  <meta name="twitter:image" content="https://jents.co/og-image.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto+Slab:wght@900&display=swap" rel="stylesheet">
@@ -37,14 +44,14 @@
       --max-w: 1120px;
     }
 
-    html { scroll-behavior: smooth; overflow-x: hidden; }
+    html { scroll-behavior: smooth; overflow: hidden auto; }
+    body { max-width: 100vw; overflow-x: clip; }
 
     body {
       font-family: var(--font);
       background: var(--bg-base);
       color: var(--text);
       line-height: 1.6;
-      overflow-x: hidden;
     }
 
     body::before {
