@@ -1128,6 +1128,44 @@
       font-style: italic;
     }
 
+    .manifesto-expand { text-align: center; margin-top: 24px; }
+    .manifesto-toggle {
+      background: none;
+      border: 1px solid var(--border-hover);
+      color: var(--text-secondary);
+      padding: 10px 24px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: var(--font);
+      transition: all 0.2s;
+    }
+    .manifesto-toggle:hover {
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+    }
+    .manifesto-full {
+      max-width: 720px;
+      margin: 32px auto 0;
+      text-align: left;
+      display: none;
+    }
+    .manifesto-full.open { display: block; }
+    .manifesto-full p {
+      font-size: 16px;
+      color: var(--text-secondary);
+      line-height: 1.8;
+      margin-bottom: 20px;
+    }
+    .manifesto-full p strong { color: var(--text); }
+    .manifesto-full .sig {
+      margin-top: 32px;
+      font-size: 14px;
+      color: var(--text-dim);
+      font-style: italic;
+    }
+
     /* === Keyboard Shortcuts === */
     .shortcuts {
       padding: 100px 0;
@@ -1911,6 +1949,19 @@
       <blockquote class="manifesto-quote">
         <p>"Job titles are containers for work - sufficiently narrow to be focused, sufficiently broad to be useful. That's what makes them perfect containers for AI agents."</p>
       </blockquote>
+
+      <div class="manifesto-expand">
+        <button class="manifesto-toggle" onclick="document.getElementById('manifesto').classList.toggle('open'); this.textContent = this.textContent === 'Read the full manifesto' ? 'Close manifesto' : 'Read the full manifesto'">Read the full manifesto</button>
+        <div class="manifesto-full" id="manifesto">
+          <p>The business world has spent centuries evolving containers for work. CFO. CMO. Chief of Staff. Product Manager. These titles aren't arbitrary. Each one is <strong>sufficiently narrow in objectives</strong> to be focused, and <strong>sufficiently broad in capabilities</strong> to be useful.</p>
+          <p>That's what makes them perfect containers for AI agents. And Jents is built for the person who's figured that out.</p>
+          <p><strong>You're a founder, operator, or team lead</strong> who's already using Claude Code. You've written CLAUDE.md files that define each agent's mandate. You've connected MCP servers so they can query your data, read your messages, update your tools. You've set permission modes so some agents run autonomously while others wait for approval. The agents work. The problem is managing them.</p>
+          <p>You've got four terminal tabs open and you keep losing track of which one is doing what. An agent finishes a 10-minute task in the background and you don't notice for an hour. You want to paste a complex prompt but the terminal mangles it line by line. The output is beautiful markdown buried under ANSI codes and spinner characters.</p>
+          <p><strong>Jents fixes all of that.</strong> Your agents live in a sidebar with colored avatars and status dots. Desktop notifications tell you the moment an agent finishes. The notepad lets you save prompts and fire them at any agent with one click. Reader view strips the noise and renders clean formatted output you can copy into a doc. Every session is auto-saved so you can review what any agent did last Tuesday.</p>
+          <p>It's like a <strong>beautiful orchestra</strong> once everything's in motion. And it dramatically expands the surface area of what any one person can do when it's customized for your business and your life.</p>
+          <p class="sig">- The Jents Team</p>
+        </div>
+      </div>
     </div>
   </section>
 
