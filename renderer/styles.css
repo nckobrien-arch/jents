@@ -133,15 +133,16 @@ html, body {
   font-family: var(--font-ui);
   color: white;
   cursor: pointer;
-  border: none;
+  border: 2px solid transparent;
   position: relative;
   -webkit-app-region: no-drag;
-  transition: border-radius 0.2s ease, transform var(--transition-fast);
+  transition: border-radius 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .workspace-avatar:hover {
   border-radius: 12px;
-  transform: scale(1.05);
+  border-color: rgba(255,255,255,0.7);
+  box-shadow: 0 0 12px rgba(255,255,255,0.2);
 }
 
 .workspace-avatar.active {
