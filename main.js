@@ -44,19 +44,81 @@ const sessionBuffers = new Map();
 const idleTimers = new Map();
 const outputSinceIdle = new Map();
 
+// Run tracking
+const activeRuns = new Map(); // agentId -> { id, agentId, startedAt, trigger, logPath }
+
 const USER_DATA_DIR = path.join(os.homedir(), process.env.JENTS_DATA_DIR || 'agent-desk');
 
-function getConfig() {
-  const userPath = path.join(USER_DATA_DIR, 'team.json');
+// --- Workspaces ---
+
+let workspacesCache = null;
+
+function getWorkspacesConfig() {
+  if (workspacesCache) return workspacesCache;
+  const wsPath = path.join(USER_DATA_DIR, 'workspaces.json');
+  if (fs.existsSync(wsPath)) {
+    try {
+      workspacesCache = JSON.parse(fs.readFileSync(wsPath, 'utf-8'));
+      return workspacesCache;
+    } catch {}
+  }
+  // Auto-migrate: create workspaces.json from existing team.json
+  const defaultWs = {
+    activeWorkspaceId: 'default',
+    workspaces: [{ id: 'default', name: 'Default', color: '#5b8def', configFile: 'team.json', lastSelectedAgentId: null, order: 0 }],
+  };
+  ensureDir(USER_DATA_DIR);
+  fs.writeFileSync(wsPath, JSON.stringify(defaultWs, null, 2));
+  workspacesCache = defaultWs;
+  return defaultWs;
+}
+
+function saveWorkspacesConfig(data) {
+  ensureDir(USER_DATA_DIR);
+  fs.writeFileSync(path.join(USER_DATA_DIR, 'workspaces.json'), JSON.stringify(data, null, 2));
+  workspacesCache = data;
+}
+
+function getActiveConfigPath() {
+  const wConfig = getWorkspacesConfig();
+  const ws = wConfig.workspaces.find(w => w.id === wConfig.activeWorkspaceId);
+  return path.join(USER_DATA_DIR, ws ? ws.configFile : 'team.json');
+}
+
+function getConfig(workspaceId) {
+  const wConfig = getWorkspacesConfig();
+  const wsId = workspaceId || wConfig.activeWorkspaceId || 'default';
+  const ws = wConfig.workspaces.find(w => w.id === wsId);
+  const filename = ws ? ws.configFile : 'team.json';
+  const configPath = path.join(USER_DATA_DIR, filename);
+  // Fall back to bundled team.json for default workspace
   const bundlePath = path.join(__dirname, 'team.json');
-  // Prefer user data dir (persists across repackages), fall back to bundle
-  const configPath = fs.existsSync(userPath) ? userPath : (fs.existsSync(bundlePath) ? bundlePath : null);
-  if (!configPath) return { agents: [] };
+  const finalPath = fs.existsSync(configPath) ? configPath : (wsId === 'default' && fs.existsSync(bundlePath) ? bundlePath : null);
+  if (!finalPath) return { agents: [] };
   try {
-    return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    return JSON.parse(fs.readFileSync(finalPath, 'utf-8'));
   } catch {
     return { agents: [] };
   }
+}
+
+function findAgentAcrossWorkspaces(agentId) {
+  const wConfig = getWorkspacesConfig();
+  for (const ws of wConfig.workspaces) {
+    const wsConfig = getConfig(ws.id);
+    const agent = wsConfig.agents.find(a => a.id === agentId);
+    if (agent) return agent;
+  }
+  return null;
+}
+
+function findWorkspaceForAgent(agentId) {
+  const wConfig = getWorkspacesConfig();
+  for (const ws of wConfig.workspaces) {
+    const wsConfig = getConfig(ws.id);
+    if (wsConfig.agents.some(a => a.id === agentId)) return ws.id;
+  }
+  return wConfig.activeWorkspaceId;
 }
 
 function ensureDir(dir) {
@@ -66,6 +128,113 @@ function ensureDir(dir) {
 
 function getLogsDir(agentId) {
   return ensureDir(path.join(USER_DATA_DIR, 'logs', agentId));
+}
+
+// --- Data Helpers (todos, inbox, runs) ---
+
+function loadJsonFile(filename, defaultValue) {
+  const filePath = path.join(USER_DATA_DIR, filename);
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf-8')); }
+  catch { return defaultValue; }
+}
+
+function saveJsonFile(filename, data) {
+  ensureDir(USER_DATA_DIR);
+  fs.writeFileSync(path.join(USER_DATA_DIR, filename), JSON.stringify(data, null, 2));
+}
+
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// --- Runs ---
+
+function loadRuns() { return loadJsonFile('runs.json', []); }
+function saveRuns(runs) { saveJsonFile('runs.json', runs); }
+
+function createRunRecord(agentId, trigger, logPath) {
+  const run = {
+    id: generateId(),
+    agentId,
+    startedAt: Date.now(),
+    endedAt: null,
+    exitCode: null,
+    trigger,
+    logPath,
+    durationSec: null,
+    summary: null,
+  };
+  activeRuns.set(agentId, run);
+  return run;
+}
+
+function extractSummary(agentId) {
+  const buffer = sessionBuffers.get(agentId) || '';
+  if (!buffer) return null;
+  // Get last 3KB, strip ANSI codes
+  const tail = buffer.slice(-3000).replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+  const lines = tail.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return null;
+
+  // Look for explicit summary markers
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^(summary|result|done|completed|finished)/i.test(lines[i])) {
+      const summaryLines = lines.slice(i, i + 3).join(' ');
+      return summaryLines.slice(0, 200);
+    }
+  }
+  // Fallback: last meaningful non-prompt line
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (l.length > 10 && !/^\$|^>|^%|Session ended|exit code/i.test(l)) {
+      return l.slice(0, 200);
+    }
+  }
+  return null;
+}
+
+function finalizeRun(agentId, exitCode) {
+  const run = activeRuns.get(agentId);
+  if (!run) return null;
+  run.endedAt = Date.now();
+  run.exitCode = exitCode;
+  run.durationSec = Math.round((run.endedAt - run.startedAt) / 1000);
+  run.summary = extractSummary(agentId);
+  activeRuns.delete(agentId);
+
+  // Persist - keep last 200 runs
+  const runs = loadRuns();
+  runs.unshift(run);
+  if (runs.length > 200) runs.length = 200;
+  saveRuns(runs);
+
+  return run;
+}
+
+// --- Inbox ---
+
+function loadInbox() {
+  const items = loadJsonFile('inbox.json', []);
+  // Auto-expire items older than 48h
+  const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+  const filtered = items.filter(i => i.timestamp > cutoff);
+  if (filtered.length !== items.length) saveJsonFile('inbox.json', filtered);
+  return filtered;
+}
+
+function addInboxItem(item) {
+  const inbox = loadInbox();
+  inbox.unshift(item);
+  if (inbox.length > 100) inbox.length = 100;
+  saveJsonFile('inbox.json', inbox);
+  mainWindow?.webContents.send('inbox:new', item);
+}
+
+function formatDuration(sec) {
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
 function loadWindowState() {
@@ -122,7 +291,8 @@ function sendNotification(agentId, title, body) {
   n.on('click', () => {
     mainWindow?.show();
     mainWindow?.focus();
-    mainWindow?.webContents.send('agent:focus', agentId);
+    const wsId = findWorkspaceForAgent(agentId);
+    mainWindow?.webContents.send('agent:focus', agentId, wsId);
   });
   n.show();
 }
@@ -130,14 +300,25 @@ function sendNotification(agentId, title, body) {
 function resetIdleTimer(agentId, agent) {
   clearTimeout(idleTimers.get(agentId));
 
-  const bytes = outputSinceIdle.get(agentId) || 0;
-  outputSinceIdle.set(agentId, bytes);
-
   idleTimers.set(agentId, setTimeout(() => {
     const totalBytes = outputSinceIdle.get(agentId) || 0;
     // Only notify if there was substantial output (agent did real work)
-    if (totalBytes > 300 && !mainWindow?.isFocused()) {
-      sendNotification(agentId, agent.shortName, 'Ready for input');
+    if (totalBytes > 300) {
+      if (!mainWindow?.isFocused()) {
+        sendNotification(agentId, agent.shortName, 'Ready for input');
+      }
+      // Inbox item for idle
+      addInboxItem({
+        id: generateId(),
+        type: 'idle',
+        agentId,
+        title: `${agent.shortName} - Ready for input`,
+        detail: `Produced ${Math.round(totalBytes / 1024)}KB of output`,
+        summary: null,
+        timestamp: Date.now(),
+        read: false,
+        runId: null,
+      });
     }
     outputSinceIdle.set(agentId, 0);
   }, 8000));
@@ -165,8 +346,7 @@ function resolveCommand(cmd) {
 }
 
 function spawnAgent(agentId, opts = {}) {
-  const config = getConfig();
-  const agent = config.agents.find(a => a.id === agentId);
+  const agent = findAgentAcrossWorkspaces(agentId);
   if (!agent) return null;
 
   killAgent(agentId);
@@ -228,6 +408,10 @@ function spawnAgent(agentId, opts = {}) {
   sessionBuffers.set(agentId, '');
   outputSinceIdle.set(agentId, 0);
 
+  // Create run record
+  const trigger = opts.resume ? 'resume' : 'manual';
+  createRunRecord(agentId, trigger, logPath);
+
   ptyProcess.onData((data) => {
     logStream.write(data);
     let buffer = sessionBuffers.get(agentId) || '';
@@ -242,6 +426,9 @@ function spawnAgent(agentId, opts = {}) {
   });
 
   ptyProcess.onExit(({ exitCode }) => {
+    // Finalize run record before clearing buffer
+    const run = finalizeRun(agentId, exitCode);
+
     logStream.end();
     logStreams.delete(agentId);
     sessions.delete(agentId);
@@ -252,6 +439,22 @@ function spawnAgent(agentId, opts = {}) {
     // Desktop notification on exit
     const label = exitCode === 0 ? 'Session ended normally' : `Exited with code ${exitCode}`;
     sendNotification(agentId, `${agent.shortName} — Stopped`, label);
+
+    // Inbox item on exit
+    const duration = run ? formatDuration(run.durationSec) : '';
+    addInboxItem({
+      id: generateId(),
+      type: 'exit',
+      agentId,
+      title: `${agent.shortName} - Stopped`,
+      detail: exitCode === 0
+        ? `Completed${duration ? ' in ' + duration : ''}`
+        : `Exited with code ${exitCode}${duration ? ' after ' + duration : ''}`,
+      summary: run?.summary || null,
+      timestamp: Date.now(),
+      read: false,
+      runId: run?.id || null,
+    });
   });
 
   return { pid: ptyProcess.pid };
@@ -406,8 +609,7 @@ ipcMain.handle('logs:read', (_, logPath) => {
 
 ipcMain.handle('config:save', (_, newConfig) => {
   ensureDir(USER_DATA_DIR);
-  const configPath = path.join(USER_DATA_DIR, 'team.json');
-  fs.writeFileSync(configPath, JSON.stringify(newConfig, null, 2));
+  fs.writeFileSync(getActiveConfigPath(), JSON.stringify(newConfig, null, 2));
   return true;
 });
 
@@ -418,8 +620,7 @@ ipcMain.handle('config:set-agent-field', (_, agentId, field, value) => {
   if (!agent) return null;
   agent[field] = value;
   ensureDir(USER_DATA_DIR);
-  const configPath = path.join(USER_DATA_DIR, 'team.json');
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  fs.writeFileSync(getActiveConfigPath(), JSON.stringify(config, null, 2));
   return config;
 });
 
@@ -427,8 +628,7 @@ ipcMain.handle('config:add-agent', (_, newAgent) => {
   const config = getConfig();
   config.agents.push(newAgent);
   ensureDir(USER_DATA_DIR);
-  const configPath = path.join(USER_DATA_DIR, 'team.json');
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  fs.writeFileSync(getActiveConfigPath(), JSON.stringify(config, null, 2));
   // Auto-create the working directory so it's ready
   if (newAgent.cwd) {
     const cwd = newAgent.cwd.replace(/^~/, os.homedir());
@@ -440,9 +640,83 @@ ipcMain.handle('config:add-agent', (_, newAgent) => {
 ipcMain.handle('config:remove-agent', (_, agentId) => {
   const config = getConfig();
   config.agents = config.agents.filter(a => a.id !== agentId);
-  const configPath = path.join(USER_DATA_DIR, 'team.json');
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  fs.writeFileSync(getActiveConfigPath(), JSON.stringify(config, null, 2));
   return config;
+});
+
+// --- Workspace IPC Handlers ---
+
+ipcMain.handle('workspaces:get', () => getWorkspacesConfig());
+
+ipcMain.handle('workspaces:set-active', (_, workspaceId) => {
+  const wConfig = getWorkspacesConfig();
+  wConfig.activeWorkspaceId = workspaceId;
+  saveWorkspacesConfig(wConfig);
+  return getConfig(workspaceId);
+});
+
+ipcMain.handle('workspaces:create', (_, { name, color }) => {
+  const wConfig = getWorkspacesConfig();
+  let id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+            || 'workspace-' + Date.now().toString(36);
+  let uniqueId = id;
+  let counter = 2;
+  while (wConfig.workspaces.some(w => w.id === uniqueId)) {
+    uniqueId = `${id}-${counter++}`;
+  }
+  const configFile = `team-${uniqueId}.json`;
+  ensureDir(USER_DATA_DIR);
+  fs.writeFileSync(path.join(USER_DATA_DIR, configFile), JSON.stringify({ agents: [] }, null, 2));
+  const newWs = {
+    id: uniqueId, name, color, configFile,
+    lastSelectedAgentId: null,
+    order: wConfig.workspaces.length,
+  };
+  wConfig.workspaces.push(newWs);
+  saveWorkspacesConfig(wConfig);
+  return wConfig;
+});
+
+ipcMain.handle('workspaces:update', (_, workspaceId, updates) => {
+  const wConfig = getWorkspacesConfig();
+  const ws = wConfig.workspaces.find(w => w.id === workspaceId);
+  if (!ws) return null;
+  if (updates.name !== undefined) ws.name = updates.name;
+  if (updates.color !== undefined) ws.color = updates.color;
+  if (updates.order !== undefined) ws.order = updates.order;
+  if (updates.lastSelectedAgentId !== undefined) ws.lastSelectedAgentId = updates.lastSelectedAgentId;
+  saveWorkspacesConfig(wConfig);
+  return wConfig;
+});
+
+ipcMain.handle('workspaces:delete', (_, workspaceId) => {
+  const wConfig = getWorkspacesConfig();
+  const ws = wConfig.workspaces.find(w => w.id === workspaceId);
+  if (!ws || wConfig.workspaces.length <= 1) return wConfig;
+  // Kill all agents in this workspace
+  const wsConfig = getConfig(workspaceId);
+  for (const agent of wsConfig.agents) {
+    killAgent(agent.id);
+  }
+  // Delete config file
+  try { fs.unlinkSync(path.join(USER_DATA_DIR, ws.configFile)); } catch {}
+  wConfig.workspaces = wConfig.workspaces.filter(w => w.id !== workspaceId);
+  if (wConfig.activeWorkspaceId === workspaceId) {
+    wConfig.activeWorkspaceId = wConfig.workspaces[0]?.id || 'default';
+  }
+  saveWorkspacesConfig(wConfig);
+  return wConfig;
+});
+
+ipcMain.handle('workspaces:check-agent-id', (_, agentId) => {
+  const wConfig = getWorkspacesConfig();
+  for (const ws of wConfig.workspaces) {
+    const wsConfig = getConfig(ws.id);
+    if (wsConfig.agents.some(a => a.id === agentId)) {
+      return { exists: true, workspaceName: ws.name };
+    }
+  }
+  return { exists: false };
 });
 
 ipcMain.handle('files:recent', () => getRecentFiles());
@@ -474,15 +748,31 @@ ipcMain.handle('files:reveal', (_, filePath) => {
   shell.showItemInFolder(filePath);
 });
 
+ipcMain.handle('files:resolve-path', (_, agentId, filePath) => {
+  // Absolute path
+  if (filePath.startsWith('/')) {
+    return fs.existsSync(filePath) ? filePath : null;
+  }
+  // Home-relative path
+  if (filePath.startsWith('~/')) {
+    const resolved = path.join(os.homedir(), filePath.slice(2));
+    return fs.existsSync(resolved) ? resolved : null;
+  }
+  // Relative path - resolve against agent's cwd
+  const agent = findAgentAcrossWorkspaces(agentId);
+  if (!agent || !agent.cwd) return null;
+  const cwd = agent.cwd.replace(/^~/, os.homedir());
+  const resolved = path.join(cwd, filePath);
+  return fs.existsSync(resolved) ? resolved : null;
+});
+
 ipcMain.handle('shell:open-external', (_, url) => {
   shell.openExternal(url);
 });
 
 ipcMain.handle('bugs:save', (_, bug) => {
-  // Save to user's home agent-desk dir (not __dirname which may be inside .app bundle)
-  const bugsDir = path.join(os.homedir(), 'agent-desk');
-  ensureDir(bugsDir);
-  const bugsPath = path.join(bugsDir, 'bugs.json');
+  ensureDir(USER_DATA_DIR);
+  const bugsPath = path.join(USER_DATA_DIR, 'bugs.json');
   let bugs = [];
   try { bugs = JSON.parse(fs.readFileSync(bugsPath, 'utf-8')); } catch {}
   bugs.push(bug);
@@ -491,24 +781,21 @@ ipcMain.handle('bugs:save', (_, bug) => {
 });
 
 ipcMain.handle('notes:load', () => {
-  const notesDir = path.join(os.homedir(), 'agent-desk');
-  ensureDir(notesDir);
-  const notesPath = path.join(notesDir, 'notes.json');
+  ensureDir(USER_DATA_DIR);
+  const notesPath = path.join(USER_DATA_DIR, 'notes.json');
   try { return JSON.parse(fs.readFileSync(notesPath, 'utf-8')); }
   catch { return []; }
 });
 
 ipcMain.handle('notes:save', (_, notes) => {
-  const notesDir = path.join(os.homedir(), 'agent-desk');
-  ensureDir(notesDir);
-  const notesPath = path.join(notesDir, 'notes.json');
+  ensureDir(USER_DATA_DIR);
+  const notesPath = path.join(USER_DATA_DIR, 'notes.json');
   fs.writeFileSync(notesPath, JSON.stringify(notes, null, 2));
   return true;
 });
 
 ipcMain.handle('mcp:read', (_, agentId) => {
-  const config = getConfig();
-  const agent = config.agents.find(a => a.id === agentId);
+  const agent = findAgentAcrossWorkspaces(agentId);
   if (!agent || !agent.cwd) return null;
   const mcpPath = path.join(agent.cwd.replace(/^~/, os.homedir()), '.mcp.json');
   try { return JSON.parse(fs.readFileSync(mcpPath, 'utf-8')); }
@@ -516,8 +803,7 @@ ipcMain.handle('mcp:read', (_, agentId) => {
 });
 
 ipcMain.handle('mcp:write', (_, agentId, mcpConfig) => {
-  const config = getConfig();
-  const agent = config.agents.find(a => a.id === agentId);
+  const agent = findAgentAcrossWorkspaces(agentId);
   if (!agent || !agent.cwd) return false;
   const mcpPath = path.join(agent.cwd.replace(/^~/, os.homedir()), '.mcp.json');
   fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2));
@@ -616,8 +902,7 @@ ipcMain.handle('agent:clone-github', async (_, url) => {
 });
 
 ipcMain.handle('agent:open-cwd', (_, agentId) => {
-  const config = getConfig();
-  const agent = config.agents.find(a => a.id === agentId);
+  const agent = findAgentAcrossWorkspaces(agentId);
   if (agent && agent.cwd) {
     const resolved = agent.cwd.replace(/^~/, os.homedir());
     shell.openPath(resolved);
@@ -777,6 +1062,30 @@ ipcMain.handle('crons:history', () => {
   } catch {
     return [];
   }
+});
+
+// --- Todos IPC ---
+
+ipcMain.handle('todos:load', () => loadJsonFile('todos.json', { goals: [], todos: [] }));
+ipcMain.handle('todos:save', (_, data) => { saveJsonFile('todos.json', data); return true; });
+
+// --- Inbox IPC ---
+
+ipcMain.handle('inbox:load', () => loadInbox());
+ipcMain.handle('inbox:save', (_, items) => { saveJsonFile('inbox.json', items); return true; });
+ipcMain.handle('inbox:clear', () => { saveJsonFile('inbox.json', []); return true; });
+
+// --- Runs IPC ---
+
+ipcMain.handle('runs:list', (_, agentId) => {
+  const runs = loadRuns();
+  if (agentId) return runs.filter(r => r.agentId === agentId);
+  return runs;
+});
+
+ipcMain.handle('runs:get', (_, runId) => {
+  const runs = loadRuns();
+  return runs.find(r => r.id === runId) || null;
 });
 
 // --- Log Rotation ---

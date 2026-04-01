@@ -12,12 +12,21 @@ let config = null;
 let activeAgentId = null;
 let readerOpen = false;
 let notes = [];
+let todosData = { goals: [], todos: [] };
+let inboxItems = [];
+let runsData = [];
 const terminals = new Map();
 const fitAddons = new Map();
 const searchAddons = new Map();
 const agentStates = new Map();
 const hasUnread = new Map();
 let terminalFontSize = 13;
+
+// Workspace state
+let workspaces = null;
+let activeWorkspaceId = null;
+const agentWorkspaceMap = new Map(); // agentId -> workspaceId
+const workspaceUnread = new Map(); // workspaceId -> boolean
 
 // --- Theme ---
 const termTheme = {
@@ -75,21 +84,34 @@ const TERMINAL_OPTS = {
 
 // --- Init ---
 async function init() {
+  // Load workspaces first
+  workspaces = await api.getWorkspaces();
+  activeWorkspaceId = workspaces.activeWorkspaceId;
+
   config = await api.getConfig();
 
+  // Build agent->workspace mapping for the active workspace
   for (const agent of config.agents) {
+    agentWorkspaceMap.set(agent.id, activeWorkspaceId);
     const running = await api.isRunning(agent.id);
     agentStates.set(agent.id, running ? 'running' : 'stopped');
     hasUnread.set(agent.id, false);
   }
 
   await loadNotes();
+  await loadTodosData();
+  await loadInboxData();
+  runsData = await api.listRuns();
+  renderWorkspaceStrip();
   renderSidebar();
   setupTerminals();
   setupEventListeners();
 
   if (config.agents.length > 0) {
-    selectAgent(config.agents[0].id);
+    const ws = workspaces.workspaces.find(w => w.id === activeWorkspaceId);
+    const lastAgent = ws?.lastSelectedAgentId;
+    const targetAgent = (lastAgent && config.agents.some(a => a.id === lastAgent)) ? lastAgent : config.agents[0].id;
+    selectAgent(targetAgent);
     showMainUI();
   } else {
     showWelcomeScreen();
@@ -136,8 +158,9 @@ async function createStarterPack(pack) {
     const tmpl = SKILL_TEMPLATES.find(t => t.id === agentDef.template) || SKILL_TEMPLATES[0];
     const id = agentDef.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-    // Skip if agent with this id already exists
-    if (config.agents.some(a => a.id === id)) continue;
+    // Skip if agent with this id already exists in any workspace
+    const idCheck = await api.checkAgentId(id);
+    if (idCheck.exists) continue;
 
     const firstWord = agentDef.name.split(/\s+/)[0];
     const shortName = firstWord.length <= 4 ? firstWord.toUpperCase() : firstWord.slice(0, 4).toUpperCase();
@@ -166,6 +189,7 @@ async function createStarterPack(pack) {
 
     agentStates.set(id, 'stopped');
     hasUnread.set(id, false);
+    agentWorkspaceMap.set(id, activeWorkspaceId);
     createTerminalForAgent(newAgent);
   }
 
@@ -173,6 +197,320 @@ async function createStarterPack(pack) {
   renderSidebar();
   if (config.agents.length > 0) selectAgent(config.agents[0].id);
   showToast(`${pack.name} created - ${pack.agents.length} agents ready`, 'success');
+}
+
+// --- Workspace Strip ---
+
+const WS_COLORS = ['#5b8def', '#ef6b6b', '#6befa0', '#a06bef', '#f59e0b', '#ec4899', '#14b8a6', '#f97316', '#8b5cf6', '#06b6d4'];
+let selectedWsColor = WS_COLORS[0];
+let editingWorkspaceId = null;
+
+function renderWorkspaceStrip() {
+  const list = document.getElementById('workspace-list');
+  list.innerHTML = '';
+
+  if (!workspaces || !workspaces.workspaces) return;
+
+  // Update sidebar header workspace name
+  const activeWs = workspaces.workspaces.find(w => w.id === activeWorkspaceId);
+  document.getElementById('workspace-name-label').textContent = activeWs ? activeWs.name : 'Workspace';
+
+  const sorted = [...workspaces.workspaces].sort((a, b) => (a.order || 0) - (b.order || 0));
+
+  for (const ws of sorted) {
+    const item = document.createElement('button');
+    item.className = 'workspace-avatar' + (ws.id === activeWorkspaceId ? ' active' : '');
+    item.dataset.workspaceId = ws.id;
+    item.style.background = ws.color || '#5b8def';
+    item.textContent = ws.name.charAt(0).toUpperCase();
+    item.title = ws.name;
+
+    if (workspaceUnread.get(ws.id) && ws.id !== activeWorkspaceId) {
+      item.classList.add('has-unread');
+    }
+
+    item.addEventListener('click', () => switchWorkspace(ws.id));
+
+    item.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showWorkspaceContextMenu(ws, e);
+    });
+
+    list.appendChild(item);
+  }
+}
+
+function showWorkspaceContextMenu(ws, e) {
+  const menu = document.getElementById('workspace-context-menu');
+  menu.innerHTML = '';
+  menu.classList.remove('hidden');
+
+  const renameBtn = document.createElement('button');
+  renameBtn.textContent = 'Rename';
+  renameBtn.addEventListener('click', () => {
+    menu.classList.add('hidden');
+    openWorkspaceModal('edit', ws);
+  });
+  menu.appendChild(renameBtn);
+
+  if (workspaces.workspaces.length > 1) {
+    const deleteBtn = document.createElement('button');
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.className = 'danger';
+    deleteBtn.addEventListener('click', () => {
+      menu.classList.add('hidden');
+      deleteWorkspace(ws.id);
+    });
+    menu.appendChild(deleteBtn);
+  }
+
+  // Position near the click
+  menu.style.left = (e.clientX + 4) + 'px';
+  menu.style.top = (e.clientY - 4) + 'px';
+
+  // Close on next click anywhere
+  const close = () => { menu.classList.add('hidden'); document.removeEventListener('click', close); };
+  setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+function toggleWorkspaceDropdown() {
+  const dropdown = document.getElementById('workspace-dropdown');
+  if (!dropdown.classList.contains('hidden')) {
+    dropdown.classList.add('hidden');
+    return;
+  }
+  renderWorkspaceDropdown();
+  dropdown.classList.remove('hidden');
+
+  const close = (e) => {
+    if (!dropdown.contains(e.target) && e.target.id !== 'workspace-name-btn' && !e.target.closest('#workspace-name-btn')) {
+      dropdown.classList.add('hidden');
+      document.removeEventListener('click', close);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+function renderWorkspaceDropdown() {
+  const list = document.getElementById('workspace-dropdown-list');
+  list.innerHTML = '';
+
+  const sorted = [...workspaces.workspaces].sort((a, b) => (a.order || 0) - (b.order || 0));
+
+  for (const ws of sorted) {
+    const item = document.createElement('div');
+    item.className = 'workspace-dropdown-item' + (ws.id === activeWorkspaceId ? ' active' : '');
+
+    const dot = document.createElement('span');
+    dot.className = 'workspace-dropdown-dot';
+    dot.style.background = ws.color || '#5b8def';
+
+    const name = document.createElement('span');
+    name.className = 'workspace-dropdown-name';
+    name.textContent = ws.name;
+
+    const actions = document.createElement('span');
+    actions.className = 'workspace-dropdown-actions';
+
+    // Edit button
+    const editBtn = document.createElement('button');
+    editBtn.title = 'Rename';
+    editBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('workspace-dropdown').classList.add('hidden');
+      openWorkspaceModal('edit', ws);
+    });
+    actions.appendChild(editBtn);
+
+    // Delete button (only if more than 1 workspace)
+    if (workspaces.workspaces.length > 1) {
+      const delBtn = document.createElement('button');
+      delBtn.className = 'danger';
+      delBtn.title = 'Delete';
+      delBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M5 6l1 13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-13"/></svg>';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.getElementById('workspace-dropdown').classList.add('hidden');
+        deleteWorkspace(ws.id);
+      });
+      actions.appendChild(delBtn);
+    }
+
+    item.appendChild(dot);
+    item.appendChild(name);
+    item.appendChild(actions);
+
+    item.addEventListener('click', () => {
+      document.getElementById('workspace-dropdown').classList.add('hidden');
+      if (ws.id !== activeWorkspaceId) switchWorkspace(ws.id);
+    });
+
+    list.appendChild(item);
+  }
+}
+
+async function switchWorkspace(workspaceId) {
+  if (workspaceId === activeWorkspaceId) return;
+
+  // Save current selection
+  if (activeAgentId) {
+    await api.updateWorkspace(activeWorkspaceId, { lastSelectedAgentId: activeAgentId });
+  }
+
+  closeAllPanels();
+
+  // Hide all terminal wrappers
+  document.querySelectorAll('.terminal-wrapper').forEach(w => w.classList.remove('active'));
+
+  const oldWorkspaceId = activeWorkspaceId;
+  activeWorkspaceId = workspaceId;
+  config = await api.setActiveWorkspace(workspaceId);
+  workspaces = await api.getWorkspaces();
+
+  // Clear workspace unread
+  workspaceUnread.set(workspaceId, false);
+
+  // Build agent->workspace mapping and ensure terminals exist
+  for (const agent of config.agents) {
+    agentWorkspaceMap.set(agent.id, workspaceId);
+    if (!agentStates.has(agent.id)) {
+      const running = await api.isRunning(agent.id);
+      agentStates.set(agent.id, running ? 'running' : 'stopped');
+      hasUnread.set(agent.id, false);
+    }
+    if (!terminals.has(agent.id)) {
+      createTerminalForAgent(agent);
+      // Restore buffer for agents that were started previously
+      const buf = await api.getBuffer(agent.id);
+      if (buf) terminals.get(agent.id).write(buf);
+    }
+  }
+
+  renderWorkspaceStrip();
+  renderSidebar();
+
+  if (config.agents.length > 0) {
+    const ws = workspaces.workspaces.find(w => w.id === workspaceId);
+    const last = ws?.lastSelectedAgentId;
+    const targetAgent = (last && config.agents.some(a => a.id === last)) ? last : config.agents[0].id;
+    selectAgent(targetAgent);
+    showMainUI();
+  } else {
+    activeAgentId = null;
+    showWelcomeScreen();
+  }
+}
+
+function openWorkspaceModal(mode, ws) {
+  editingWorkspaceId = mode === 'edit' ? ws.id : null;
+  const modal = document.getElementById('workspace-modal');
+  const title = document.getElementById('workspace-modal-title');
+  const nameInput = document.getElementById('workspace-name-input');
+  const confirmBtn = document.getElementById('btn-workspace-confirm');
+
+  title.textContent = mode === 'edit' ? 'Edit Workspace' : 'New Workspace';
+  confirmBtn.textContent = mode === 'edit' ? 'Save' : 'Create';
+  nameInput.value = mode === 'edit' ? ws.name : '';
+  selectedWsColor = mode === 'edit' ? (ws.color || WS_COLORS[0]) : WS_COLORS[Math.floor(Math.random() * WS_COLORS.length)];
+
+  renderWsColorPicker();
+  modal.classList.remove('hidden');
+  nameInput.focus();
+}
+
+function renderWsColorPicker() {
+  const picker = document.getElementById('workspace-color-picker');
+  picker.innerHTML = '';
+  for (const color of WS_COLORS) {
+    const swatch = document.createElement('div');
+    swatch.className = 'ws-color-swatch' + (color === selectedWsColor ? ' selected' : '');
+    swatch.style.background = color;
+    swatch.addEventListener('click', () => {
+      selectedWsColor = color;
+      picker.querySelectorAll('.ws-color-swatch').forEach(s => s.classList.remove('selected'));
+      swatch.classList.add('selected');
+    });
+    picker.appendChild(swatch);
+  }
+}
+
+function closeWorkspaceModal() {
+  document.getElementById('workspace-modal').classList.add('hidden');
+  editingWorkspaceId = null;
+}
+
+async function confirmWorkspaceModal() {
+  const name = document.getElementById('workspace-name-input').value.trim();
+  if (!name) { showToast('Workspace name is required', 'error'); return; }
+
+  closeWorkspaceModal();
+
+  if (editingWorkspaceId) {
+    // Edit mode - rename/recolor
+    workspaces = await api.updateWorkspace(editingWorkspaceId, { name, color: selectedWsColor });
+    renderWorkspaceStrip();
+    showToast(`Workspace renamed to "${name}"`, 'success');
+  } else {
+    // Create mode
+    workspaces = await api.createWorkspace({ name, color: selectedWsColor });
+    const newWs = workspaces.workspaces[workspaces.workspaces.length - 1];
+    renderWorkspaceStrip();
+    await switchWorkspace(newWs.id);
+    showToast(`Workspace "${name}" created`, 'success');
+  }
+}
+
+async function deleteWorkspace(workspaceId) {
+  const ws = workspaces.workspaces.find(w => w.id === workspaceId);
+  if (!ws || workspaces.workspaces.length <= 1) return;
+
+  const confirmed = await showConfirm(
+    `Delete "${ws.name}"?`,
+    'All agents in this workspace will be stopped. Agent working directories are preserved.',
+    'Delete'
+  );
+  if (!confirmed) return;
+
+  // Clean up terminals for agents in this workspace
+  for (const [agentId, wsId] of agentWorkspaceMap) {
+    if (wsId === workspaceId) {
+      const terminal = terminals.get(agentId);
+      if (terminal) terminal.dispose();
+      terminals.delete(agentId);
+      fitAddons.delete(agentId);
+      searchAddons.delete(agentId);
+      agentStates.delete(agentId);
+      hasUnread.delete(agentId);
+      agentWorkspaceMap.delete(agentId);
+      const wrapper = document.getElementById(`terminal-${agentId}`);
+      if (wrapper) wrapper.remove();
+    }
+  }
+
+  workspaces = await api.deleteWorkspace(workspaceId);
+
+  if (workspaceId === activeWorkspaceId) {
+    activeWorkspaceId = workspaces.activeWorkspaceId;
+    config = await api.setActiveWorkspace(activeWorkspaceId);
+    // Ensure terminals for the new active workspace
+    for (const agent of config.agents) {
+      agentWorkspaceMap.set(agent.id, activeWorkspaceId);
+      if (!agentStates.has(agent.id)) {
+        const running = await api.isRunning(agent.id);
+        agentStates.set(agent.id, running ? 'running' : 'stopped');
+        hasUnread.set(agent.id, false);
+      }
+      if (!terminals.has(agent.id)) {
+        createTerminalForAgent(agent);
+      }
+    }
+    renderSidebar();
+    if (config.agents.length > 0) selectAgent(config.agents[0].id);
+    else showWelcomeScreen();
+  }
+
+  renderWorkspaceStrip();
 }
 
 // --- Sidebar ---
@@ -204,11 +542,18 @@ function renderSidebar() {
 
     const removeHtml = `<button class="agent-remove-btn" data-remove-id="${agent.id}" title="Remove agent">&times;</button>`;
 
+    // Get latest run summary for this agent
+    const latestRun = runsData.find(r => r.agentId === agent.id && r.summary);
+    const summaryHtml = latestRun
+      ? `<div class="agent-item-summary" title="${latestRun.summary.replace(/"/g, '&quot;')}">${truncate(latestRun.summary, 40)} - ${formatTimeAgo(latestRun.endedAt)}</div>`
+      : '';
+
     item.innerHTML = `
       <div class="agent-avatar" style="background:${agent.color}">${agent.shortName}</div>
       <div class="agent-details">
         <div class="agent-item-name">${agent.shortName}</div>
         <div class="agent-item-role">${agent.name}</div>
+        ${summaryHtml}
         ${badgesHtml}
       </div>
       ${removeHtml}
@@ -306,6 +651,44 @@ function initTerminalForAgent(agent, wrapper) {
     api.openExternal(uri);
   }));
 
+  // File path link provider - hover to underline, click to open (.md in Reader, others externally)
+  const FILE_PATH_RE = /(?:~\/|\.\/|\/)?(?:[\w@._-]+\/)+[\w@._-]+\.\w{1,10}/g;
+  terminal.registerLinkProvider({
+    provideLinks(y, callback) {
+      const line = terminal.buffer.active.getLine(y - 1);
+      if (!line) { callback(undefined); return; }
+      const text = line.translateToString(true);
+      const links = [];
+      let m;
+      FILE_PATH_RE.lastIndex = 0;
+      while ((m = FILE_PATH_RE.exec(text)) !== null) {
+        // Skip if it looks like a URL (matched by WebLinksAddon)
+        const before = text.slice(Math.max(0, m.index - 10), m.index);
+        if (/https?:\/\/\S*$/.test(before)) continue;
+        links.push({
+          range: {
+            start: { x: m.index + 1, y },
+            end: { x: m.index + m[0].length, y },
+          },
+          text: m[0],
+          activate: async (_event, linkText) => {
+            const resolved = await api.resolveFilePath(agent.id, linkText);
+            if (!resolved) {
+              showToast('File not found: ' + linkText, 'error');
+              return;
+            }
+            if (resolved.endsWith('.md')) {
+              openMarkdownFile(resolved);
+            } else {
+              api.openFile(resolved);
+            }
+          },
+        });
+      }
+      callback(links.length > 0 ? links : undefined);
+    }
+  });
+
   terminal.open(wrapper);
   fitAddon.fit();
 
@@ -349,7 +732,8 @@ function selectAgent(agentId) {
   });
 
   // Update toolbar
-  document.getElementById('agent-name').textContent = agent.name;
+  const agentNameEl = document.getElementById('agent-name');
+  if (agentNameEl) agentNameEl.textContent = agent.name;
 
   updateStatusUI(agentId);
   updateModeBadge(agentId);
@@ -392,14 +776,28 @@ function selectAgent(agentId) {
   document.getElementById('btn-stop').title = 'Stop session';
   document.getElementById('btn-clear').classList.remove('armed');
   document.getElementById('btn-clear').title = 'Clear terminal';
+
+  // Persist last-selected agent for the workspace
+  if (activeWorkspaceId) {
+    api.updateWorkspace(activeWorkspaceId, { lastSelectedAgentId: agentId });
+  }
+}
+
+function setAgentState(agentId, state) {
+  agentStates.set(agentId, state);
+  if (agentId === activeAgentId) updateStatusUI(agentId);
+  const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
+  if (dot) dot.className = `status-dot ${state}`;
 }
 
 function updateStatusUI(agentId) {
   const state = agentStates.get(agentId) || 'stopped';
   const badge = document.getElementById('agent-status');
-  const labels = { running: 'Running', stopped: 'Stopped', error: 'Exited' };
-  badge.textContent = labels[state] || state;
-  badge.className = state;
+  if (badge) {
+    const labels = { running: 'Running', stopped: 'Stopped', error: 'Exited' };
+    badge.textContent = labels[state] || state;
+    badge.className = state;
+  }
 
   const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
   if (dot) dot.className = `status-dot ${state}`;
@@ -425,7 +823,7 @@ function saveNotesToStorage() {
 }
 
 function closeAllPanels() {
-  for (const id of ['logs-panel', 'files-panel', 'notepad-panel', 'configure-panel', 'help-panel', 'crons-panel']) {
+  for (const id of ['logs-panel', 'files-panel', 'notepad-panel', 'configure-panel', 'help-panel', 'crons-panel', 'todos-panel', 'inbox-panel']) {
     document.getElementById(id).classList.add('hidden');
   }
 }
@@ -648,56 +1046,6 @@ const AVAILABLE_CHANNELS = [
   },
 ];
 
-// --- Channels Panel ---
-function toggleChannels() {
-  const panel = document.getElementById('channels-panel');
-  if (!panel.classList.contains('hidden')) {
-    panel.classList.add('hidden');
-    return;
-  }
-  closeAllPanels();
-  renderChannelsPanel();
-  panel.classList.remove('hidden');
-}
-
-function renderChannelsPanel() {
-  if (!activeAgentId) return;
-  const agent = config.agents.find(a => a.id === activeAgentId);
-  if (!agent || agent.type === 'ssh') {
-    document.getElementById('channels-list').innerHTML =
-      '<div class="files-empty"><p>Channels not available for SSH</p></div>';
-    return;
-  }
-
-  document.getElementById('channels-agent-label').textContent =
-    `Configuring channels for ${agent.shortName}`;
-
-  const listEl = document.getElementById('channels-list');
-  listEl.innerHTML = '';
-
-  const agentChannels = agent.channels || [];
-
-  for (const ch of AVAILABLE_CHANNELS) {
-    const enabled = agentChannels.includes(ch.plugin);
-    const item = document.createElement('div');
-    item.className = `channel-item${enabled ? ' enabled' : ''}`;
-
-    item.innerHTML = `
-      <div class="channel-icon">${ch.icon}</div>
-      <div class="channel-info">
-        <div class="channel-name">${ch.name}</div>
-        <div class="channel-desc">${ch.desc}</div>
-      </div>
-      <button class="channel-toggle${enabled ? ' active' : ''}" data-channel="${ch.plugin}"></button>
-    `;
-
-    const toggle = item.querySelector('.channel-toggle');
-    toggle.addEventListener('click', () => toggleChannel(agent.id, ch.plugin));
-
-    listEl.appendChild(item);
-  }
-}
-
 async function toggleChannel(agentId, plugin) {
   const agent = config.agents.find(a => a.id === agentId);
   if (!agent) return;
@@ -830,12 +1178,7 @@ function getTerminalText(agentId) {
 }
 
 function extractMarkdown(rawText) {
-  // Strip ANSI escape codes
-  let text = rawText
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-    .replace(/\x1b\][^\x07]*\x07/g, '')
-    .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '')
-    .replace(/\x1b\(B/g, '');
+  let text = stripAnsi(rawText);
 
   // Process line by line for noise removal
   const lines = text.split('\n');
@@ -880,12 +1223,7 @@ function extractMarkdown(rawText) {
 }
 
 function extractLastResponse(rawText) {
-  // Strip ANSI first to find prompt boundaries reliably
-  const stripped = rawText
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-    .replace(/\x1b\][^\x07]*\x07/g, '')
-    .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '')
-    .replace(/\x1b\(B/g, '');
+  const stripped = stripAnsi(rawText);
 
   const lines = stripped.split('\n');
 
@@ -1110,6 +1448,14 @@ function setupEventListeners() {
       hasUnread.set(agentId, true);
       const item = document.querySelector(`.agent-item[data-agent-id="${agentId}"]`);
       if (item) item.classList.add('has-unread');
+
+      // Mark workspace-level unread for agents in other workspaces
+      const agentWsId = agentWorkspaceMap.get(agentId);
+      if (agentWsId && agentWsId !== activeWorkspaceId) {
+        workspaceUnread.set(agentWsId, true);
+        const wsAvatar = document.querySelector(`.workspace-avatar[data-workspace-id="${agentWsId}"]`);
+        if (wsAvatar) wsAvatar.classList.add('has-unread');
+      }
     } else {
       // Ensure the active agent never shows an unread badge
       hasUnread.set(agentId, false);
@@ -1119,17 +1465,33 @@ function setupEventListeners() {
   });
 
   // PTY exit
-  api.onExit((agentId, exitCode) => {
-    agentStates.set(agentId, exitCode === 0 ? 'stopped' : 'error');
-    if (agentId === activeAgentId) updateStatusUI(agentId);
-
-    const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
-    if (dot) dot.className = `status-dot ${exitCode === 0 ? 'stopped' : 'error'}`;
+  api.onExit(async (agentId, exitCode) => {
+    setAgentState(agentId, exitCode === 0 ? 'stopped' : 'error');
 
     const terminal = terminals.get(agentId);
     if (terminal) {
       terminal.writeln('');
       terminal.writeln(`  \x1b[2mSession ended (exit code: ${exitCode}). Press Start or Cmd+R to restart.\x1b[0m`);
+    }
+
+    // Refresh runs data and update sidebar summary for this agent
+    runsData = await api.listRuns();
+    const agentItem = document.querySelector(`.agent-item[data-agent-id="${agentId}"]`);
+    if (agentItem) {
+      const latestRun = runsData.find(r => r.agentId === agentId && r.summary);
+      const detailsEl = agentItem.querySelector('.agent-details');
+      const existingSummary = detailsEl?.querySelector('.agent-item-summary');
+      if (existingSummary) existingSummary.remove();
+      if (latestRun && detailsEl) {
+        const roleEl = detailsEl.querySelector('.agent-item-role');
+        if (roleEl) {
+          const sumEl = document.createElement('div');
+          sumEl.className = 'agent-item-summary';
+          sumEl.title = latestRun.summary;
+          sumEl.textContent = `${truncate(latestRun.summary, 40)} - ${formatTimeAgo(latestRun.endedAt)}`;
+          roleEl.after(sumEl);
+        }
+      }
     }
   });
 
@@ -1206,6 +1568,39 @@ function setupEventListeners() {
     tab.addEventListener('click', () => switchCronsTab(tab.dataset.tab));
   });
 
+  // Todos panel
+  document.getElementById('btn-todos').addEventListener('click', toggleTodos);
+  document.getElementById('btn-close-todos').addEventListener('click', () => {
+    document.getElementById('todos-panel').classList.add('hidden');
+  });
+  document.getElementById('btn-todo-add').addEventListener('click', addTodo);
+  document.getElementById('todo-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addTodo(); }
+  });
+  document.getElementById('btn-manage-goals').addEventListener('click', showGoalsEditor);
+  document.getElementById('btn-goals-back').addEventListener('click', hideGoalsEditor);
+  document.getElementById('btn-goal-add').addEventListener('click', addGoal);
+  document.getElementById('goal-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addGoal(); }
+  });
+
+  // Inbox panel
+  document.getElementById('btn-inbox').addEventListener('click', toggleInbox);
+  document.getElementById('btn-close-inbox').addEventListener('click', () => {
+    document.getElementById('inbox-panel').classList.add('hidden');
+  });
+  document.getElementById('btn-inbox-clear').addEventListener('click', clearInbox);
+
+  // Inbox live events
+  api.onInbox((item) => {
+    inboxItems.unshift(item);
+    updateInboxBadge();
+    // If inbox panel is open, re-render
+    if (!document.getElementById('inbox-panel').classList.contains('hidden')) {
+      renderInboxList();
+    }
+  });
+
   document.getElementById('btn-files').addEventListener('click', toggleFiles);
   document.getElementById('btn-close-files').addEventListener('click', () => {
     document.getElementById('files-panel').classList.add('hidden');
@@ -1219,13 +1614,17 @@ function setupEventListeners() {
   document.getElementById('btn-close-logs').addEventListener('click', () => {
     document.getElementById('logs-panel').classList.add('hidden');
   });
-  document.getElementById('btn-logs-back').addEventListener('click', showLogsList);
+  document.getElementById('btn-logs-back').addEventListener('click', showLogsWithRuns);
   document.getElementById('btn-log-copy').addEventListener('click', copyLogContent);
   document.getElementById('btn-log-send').addEventListener('click', sendLogToAgent);
 
-  // Notification click -> focus agent
-  api.onFocus((agentId) => {
-    selectAgent(agentId);
+  // Notification click -> focus agent (may need workspace switch)
+  api.onFocus((agentId, wsId) => {
+    if (wsId && wsId !== activeWorkspaceId) {
+      switchWorkspace(wsId).then(() => selectAgent(agentId));
+    } else {
+      selectAgent(agentId);
+    }
   });
 
   // Window resize
@@ -1313,6 +1712,9 @@ function setupEventListeners() {
   document.addEventListener('keydown', (e) => {
     // Escape closes overlays in priority order
     if (e.key === 'Escape') {
+      if (!document.getElementById('workspace-dropdown').classList.contains('hidden')) { document.getElementById('workspace-dropdown').classList.add('hidden'); return; }
+      if (!document.getElementById('workspace-modal').classList.contains('hidden')) { closeWorkspaceModal(); return; }
+      if (!document.getElementById('workspace-context-menu').classList.contains('hidden')) { document.getElementById('workspace-context-menu').classList.add('hidden'); return; }
       if (commandPaletteOpen) { closeCommandPalette(); return; }
       if (terminalSearchOpen) { closeTerminalSearch(); return; }
       if (readerOpen) { closeReader(); return; }
@@ -1324,6 +1726,18 @@ function setupEventListeners() {
         e.preventDefault();
         if (commandPaletteOpen) closeCommandPalette();
         else openCommandPalette();
+        return;
+      }
+
+      // Cmd+Shift+[ / ] switch workspaces
+      if (e.shiftKey && (e.key === '[' || e.key === '{')) {
+        e.preventDefault();
+        switchWorkspaceByOffset(-1);
+        return;
+      }
+      if (e.shiftKey && (e.key === ']' || e.key === '}')) {
+        e.preventDefault();
+        switchWorkspaceByOffset(1);
         return;
       }
 
@@ -1346,6 +1760,20 @@ function setupEventListeners() {
       if (e.key === 'e') {
         e.preventDefault();
         toggleNotepad();
+        return;
+      }
+
+      // Cmd+T toggle todos
+      if (e.key === 't') {
+        e.preventDefault();
+        toggleTodos();
+        return;
+      }
+
+      // Cmd+I toggle inbox
+      if (e.key === 'i') {
+        e.preventDefault();
+        toggleInbox();
         return;
       }
 
@@ -1417,6 +1845,34 @@ function setupEventListeners() {
       }
     }
   });
+
+  // Workspace modal events
+  document.getElementById('btn-add-workspace').addEventListener('click', () => openWorkspaceModal('create'));
+  document.getElementById('btn-workspace-cancel').addEventListener('click', closeWorkspaceModal);
+  document.getElementById('btn-workspace-confirm').addEventListener('click', confirmWorkspaceModal);
+  document.getElementById('workspace-modal-backdrop').addEventListener('click', closeWorkspaceModal);
+  document.getElementById('workspace-name-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmWorkspaceModal(); }
+    if (e.key === 'Escape') closeWorkspaceModal();
+  });
+
+  // Workspace dropdown (sidebar header)
+  document.getElementById('workspace-name-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleWorkspaceDropdown();
+  });
+  document.getElementById('btn-dropdown-new-ws').addEventListener('click', () => {
+    document.getElementById('workspace-dropdown').classList.add('hidden');
+    openWorkspaceModal('create');
+  });
+}
+
+function switchWorkspaceByOffset(offset) {
+  if (!workspaces || workspaces.workspaces.length <= 1) return;
+  const sorted = [...workspaces.workspaces].sort((a, b) => (a.order || 0) - (b.order || 0));
+  const currentIdx = sorted.findIndex(w => w.id === activeWorkspaceId);
+  const nextIdx = (currentIdx + offset + sorted.length) % sorted.length;
+  switchWorkspace(sorted[nextIdx].id);
 }
 
 // --- Actions ---
@@ -1459,11 +1915,7 @@ async function startAgent(agentId, opts = {}) {
   if (result) {
     // Show cursor now that agent is running
     if (terminal) terminal.write('\x1b[?25h');
-    agentStates.set(agentId, 'running');
-    if (agentId === activeAgentId) updateStatusUI(agentId);
-
-    const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
-    if (dot) dot.className = 'status-dot running';
+    setAgentState(agentId, 'running');
 
     requestAnimationFrame(() => {
       const fitAddon = fitAddons.get(agentId);
@@ -1482,44 +1934,13 @@ async function resumeAgent(agentId) {
 
 async function restartAgent() {
   if (!activeAgentId) return;
-  const terminal = terminals.get(activeAgentId);
-  if (terminal) terminal.clear();
-
-  const result = await api.restart(activeAgentId);
-  if (result && result.error) {
-    const term = terminals.get(activeAgentId);
-    if (term) {
-      term.writeln(`\r\n  \x1b[31m${result.error}\x1b[0m\r\n`);
-    }
-    showToast(result.error, 'error');
-    return;
-  }
-  if (result) {
-    agentStates.set(activeAgentId, 'running');
-    updateStatusUI(activeAgentId);
-
-    const dot = document.querySelector(`.status-dot[data-status="${activeAgentId}"]`);
-    if (dot) dot.className = 'status-dot running';
-
-    requestAnimationFrame(() => {
-      const fitAddon = fitAddons.get(activeAgentId);
-      if (fitAddon) {
-        fitAddon.fit();
-        const term = terminals.get(activeAgentId);
-        if (term) api.resize(activeAgentId, term.cols, term.rows);
-      }
-    });
-  }
+  return startAgent(activeAgentId);
 }
 
 async function stopAgent() {
   if (!activeAgentId) return;
   await api.kill(activeAgentId);
-  agentStates.set(activeAgentId, 'stopped');
-  updateStatusUI(activeAgentId);
-
-  const dot = document.querySelector(`.status-dot[data-status="${activeAgentId}"]`);
-  if (dot) dot.className = 'status-dot stopped';
+  setAgentState(activeAgentId, 'stopped');
 }
 
 let clearArmed = false;
@@ -1557,7 +1978,7 @@ async function toggleLogs() {
   }
   closeAllPanels();
   if (!activeAgentId) return;
-  await showLogsList();
+  await showLogsWithRuns();
   panel.classList.remove('hidden');
 }
 
@@ -1670,6 +2091,19 @@ function sendLogToAgent() {
 }
 
 // --- Helpers ---
+function truncate(str, len) {
+  if (!str) return '';
+  return str.length > len ? str.slice(0, len) + '...' : str;
+}
+
+function formatDurationShort(sec) {
+  if (!sec && sec !== 0) return '';
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
 function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1677,7 +2111,11 @@ function formatSize(bytes) {
 }
 
 function stripAnsi(str) {
-  return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+  return str
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '')
+    .replace(/\x1b\[[\?]?[0-9;]*[a-zA-Z]/g, '')
+    .replace(/\x1b\(B/g, '');
 }
 
 // --- Copy Last Response ---
@@ -1727,156 +2165,6 @@ function armStop() {
   }, 3000);
 }
 
-// --- MCP Panel ---
-let mcpConfig = null;
-let editingServerName = null;
-
-async function toggleMcp() {
-  const panel = document.getElementById('mcp-panel');
-  if (!panel.classList.contains('hidden')) {
-    panel.classList.add('hidden');
-    return;
-  }
-  closeAllPanels();
-  await loadMcpPanel();
-  panel.classList.remove('hidden');
-}
-
-async function loadMcpPanel() {
-  if (!activeAgentId) return;
-  const agent = config.agents.find(a => a.id === activeAgentId);
-  document.getElementById('mcp-agent-label').textContent = agent ? agent.shortName : '';
-
-  mcpConfig = await api.readMcp(activeAgentId);
-  renderMcpList();
-}
-
-function renderMcpList() {
-  const listEl = document.getElementById('mcp-list');
-  const editorEl = document.getElementById('mcp-editor');
-  editorEl.classList.add('hidden');
-  listEl.style.display = 'block';
-  listEl.innerHTML = '';
-
-  const servers = mcpConfig && mcpConfig.mcpServers ? mcpConfig.mcpServers : {};
-  const names = Object.keys(servers);
-
-  if (names.length === 0) {
-    listEl.innerHTML = '<div class="files-empty"><p>No MCP servers configured</p></div>';
-    return;
-  }
-
-  for (const name of names) {
-    const server = servers[name];
-    const item = document.createElement('div');
-    item.className = 'mcp-item';
-
-    const typeLabel = server.type || 'stdio';
-    const detail = server.type === 'http' ? server.url : (server.command || '');
-
-    item.innerHTML = `
-      <div class="mcp-item-info">
-        <div class="mcp-item-name">${escapeHtml(name)}</div>
-        <div class="mcp-item-detail">${escapeHtml(typeLabel)} - ${escapeHtml(detail)}</div>
-      </div>
-      <div class="mcp-item-actions">
-        <button class="note-action-btn note-send-btn mcp-edit-btn" title="Edit">Edit</button>
-        <button class="note-action-btn note-delete-btn mcp-del-btn" title="Remove">Del</button>
-      </div>
-    `;
-
-    item.querySelector('.mcp-edit-btn').addEventListener('click', () => editMcpServer(name));
-    item.querySelector('.mcp-del-btn').addEventListener('click', () => deleteMcpServer(name));
-    listEl.appendChild(item);
-  }
-}
-
-function editMcpServer(name) {
-  editingServerName = name;
-  const servers = mcpConfig.mcpServers || {};
-  const serverJson = JSON.stringify(servers[name] || {}, null, 2);
-
-  document.getElementById('mcp-list').style.display = 'none';
-  document.getElementById('mcp-editor').classList.remove('hidden');
-  document.getElementById('mcp-editor-title').textContent = name;
-  document.getElementById('mcp-editor-input').value = serverJson;
-}
-
-function addMcpServer() {
-  // Show integration library instead of bare prompt
-  renderMcpLibrary();
-}
-
-function renderMcpLibrary() {
-  const listEl = document.getElementById('mcp-list');
-  const editorEl = document.getElementById('mcp-editor');
-  editorEl.classList.add('hidden');
-  listEl.style.display = 'block';
-  listEl.innerHTML = '<div class="mcp-library-header">Integration Library</div>';
-
-  for (const tmpl of MCP_TEMPLATES) {
-    const item = document.createElement('div');
-    item.className = 'mcp-item mcp-library-item';
-    item.innerHTML = `
-      <div class="mcp-item-info">
-        <div class="mcp-item-name">${escapeHtml(tmpl.name)}</div>
-        <div class="mcp-item-detail">${escapeHtml(tmpl.desc)}</div>
-      </div>
-      <div class="mcp-item-actions">
-        <button class="note-action-btn note-send-btn mcp-add-tmpl-btn">Add</button>
-      </div>
-    `;
-    item.querySelector('.mcp-add-tmpl-btn').addEventListener('click', () => {
-      if (!mcpConfig) mcpConfig = { mcpServers: {} };
-      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-      mcpConfig.mcpServers[tmpl.id] = JSON.parse(JSON.stringify(tmpl.config));
-      editMcpServer(tmpl.id);
-      showToast(tmpl.setupNote, 'info');
-    });
-    listEl.appendChild(item);
-  }
-
-  // Custom server option at bottom
-  const customItem = document.createElement('div');
-  customItem.className = 'mcp-item mcp-library-item';
-  customItem.innerHTML = `
-    <div class="mcp-item-info">
-      <div class="mcp-item-name">Custom Server</div>
-      <div class="mcp-item-detail">Configure a server manually with JSON</div>
-    </div>
-    <div class="mcp-item-actions">
-      <button class="note-action-btn note-send-btn mcp-add-custom-btn">Add</button>
-    </div>
-  `;
-  customItem.querySelector('.mcp-add-custom-btn').addEventListener('click', () => {
-    const name = prompt('Server name:');
-    if (!name || !name.trim()) return;
-    if (!mcpConfig) mcpConfig = { mcpServers: {} };
-    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-    mcpConfig.mcpServers[name.trim()] = { type: 'stdio', command: '', args: [] };
-    editMcpServer(name.trim());
-  });
-  listEl.appendChild(customItem);
-}
-
-async function saveMcpEditor() {
-  try {
-    const parsed = JSON.parse(document.getElementById('mcp-editor-input').value);
-    mcpConfig.mcpServers[editingServerName] = parsed;
-    await api.writeMcp(activeAgentId, mcpConfig);
-    renderMcpList();
-  } catch (err) {
-    alert('Invalid JSON: ' + err.message);
-  }
-}
-
-async function deleteMcpServer(name) {
-  if (!mcpConfig || !mcpConfig.mcpServers) return;
-  delete mcpConfig.mcpServers[name];
-  await api.writeMcp(activeAgentId, mcpConfig);
-  renderMcpList();
-}
-
 // --- Agent Duplication ---
 async function duplicateAgent() {
   if (!activeAgentId) return;
@@ -1902,6 +2190,7 @@ async function duplicateAgent() {
   // Initialize state
   agentStates.set(newId, 'stopped');
   hasUnread.set(newId, false);
+  agentWorkspaceMap.set(newId, activeWorkspaceId);
 
   // Create terminal for new agent
   createTerminalForAgent(newAgent);
@@ -2095,18 +2384,21 @@ async function removeAgent(agentId, skipConfirm = false) {
   api.kill(agentId);
   agentStates.delete(agentId);
   hasUnread.delete(agentId);
+  agentWorkspaceMap.delete(agentId);
 
   // Remove terminal
   const terminal = terminals.get(agentId);
   if (terminal) terminal.dispose();
   terminals.delete(agentId);
   fitAddons.delete(agentId);
+  searchAddons.delete(agentId);
 
   const wrapper = document.getElementById(`terminal-${agentId}`);
   if (wrapper) wrapper.remove();
 
   // Remove from config (atomic)
-  api.removeAgentConfig(agentId).then(updated => { if (updated) config = updated; });
+  const updated = await api.removeAgentConfig(agentId);
+  if (updated) config = updated;
 
   renderSidebar();
   if (activeAgentId === agentId) {
@@ -2726,9 +3018,10 @@ async function confirmAddAgent() {
     return;
   }
 
-  // Check for duplicate id
-  if (config.agents.some(a => a.id === id)) {
-    showToast('An agent with this name already exists', 'error');
+  // Check for duplicate id across all workspaces
+  const idCheck = await api.checkAgentId(id);
+  if (idCheck.exists) {
+    showToast(`Agent ID "${id}" already exists in workspace "${idCheck.workspaceName}"`, 'error');
     return;
   }
 
@@ -2772,6 +3065,7 @@ async function confirmAddAgent() {
   // Initialize state
   agentStates.set(id, 'stopped');
   hasUnread.set(id, false);
+  agentWorkspaceMap.set(id, activeWorkspaceId);
 
   // Create terminal
   createTerminalForAgent(newAgent);
@@ -2816,9 +3110,10 @@ async function importFromGithub() {
     const firstWord = name.split(/\s+/)[0];
     const shortName = firstWord.length <= 4 ? firstWord.toUpperCase() : firstWord.slice(0, 4).toUpperCase();
 
-    // Check for duplicate
-    if (config.agents.some(a => a.id === id)) {
-      showToast(`Agent "${id}" already exists`, 'error');
+    // Check for duplicate across all workspaces
+    const idCheck = await api.checkAgentId(id);
+    if (idCheck.exists) {
+      showToast(`Agent "${id}" already exists in workspace "${idCheck.workspaceName}"`, 'error');
       btn.textContent = 'Import';
       btn.disabled = false;
       return;
@@ -2841,6 +3136,7 @@ async function importFromGithub() {
 
     agentStates.set(id, 'stopped');
     hasUnread.set(id, false);
+    agentWorkspaceMap.set(id, activeWorkspaceId);
     createTerminalForAgent(newAgent);
 
     showMainUI();
@@ -3196,12 +3492,10 @@ async function saveConfigureAgent() {
     showToast('All fields are required', 'error');
     return;
   }
-  await api.setAgentField(activeAgentId, 'name', name);
-  await api.setAgentField(activeAgentId, 'shortName', shortName);
-  await api.setAgentField(activeAgentId, 'cwd', cwd);
-  await api.setAgentField(activeAgentId, 'command', command);
-  const updated = await api.setAgentField(activeAgentId, 'color', selectedColor);
-  if (updated) config = updated;
+  const agent = config.agents.find(a => a.id === activeAgentId);
+  if (!agent) return;
+  Object.assign(agent, { name, shortName, cwd, command, color: selectedColor });
+  await api.saveConfig(config);
   renderSidebar();
   selectAgent(activeAgentId);
   showToast('Settings saved', 'success');
@@ -3260,6 +3554,8 @@ async function submitBug() {
 // --- Sidebar Toggle ---
 function toggleSidebar() {
   document.getElementById('sidebar').classList.toggle('collapsed');
+  const strip = document.getElementById('workspace-strip');
+  if (strip) strip.classList.toggle('hidden');
   // Re-fit terminal after sidebar width change
   requestAnimationFrame(() => {
     if (activeAgentId) {
@@ -3345,6 +3641,9 @@ const COMMANDS = [
   { label: 'Reset Font Size', shortcut: ['Cmd', '0'], action: () => resetFontSize() },
   { label: 'Report Bug', shortcut: [], action: () => openBugModal() },
   { label: 'Agent Guide', shortcut: [], action: () => toggleHelp() },
+  { label: 'New Workspace', shortcut: [], action: () => openWorkspaceModal('create') },
+  { label: 'Next Workspace', shortcut: ['Cmd', 'Shift', ']'], action: () => switchWorkspaceByOffset(1) },
+  { label: 'Previous Workspace', shortcut: ['Cmd', 'Shift', '['], action: () => switchWorkspaceByOffset(-1) },
 ];
 
 let commandPaletteOpen = false;
@@ -3525,6 +3824,492 @@ function renderFilteredLogs(query) {
     item.innerHTML = `
       <div class="log-item-date">${dateStr} at ${timeStr}</div>
       <div class="log-item-meta"><span>${size}</span></div>
+    `;
+    item.addEventListener('click', () => viewLog(log));
+    listEl.appendChild(item);
+  }
+}
+
+// --- Todos ---
+
+async function loadTodosData() {
+  try { todosData = await api.loadTodos(); }
+  catch { todosData = { goals: [], todos: [] }; }
+}
+
+function saveTodosData() { api.saveTodos(todosData); }
+
+function toggleTodos() {
+  const panel = document.getElementById('todos-panel');
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    if (activeAgentId) terminals.get(activeAgentId)?.focus();
+    return;
+  }
+  closeAllPanels();
+  panel.classList.remove('hidden');
+  document.getElementById('goals-editor').classList.add('hidden');
+  populateTodoSelects();
+  renderTodosList();
+  document.getElementById('todo-input').focus();
+}
+
+function populateTodoSelects() {
+  // Agent select
+  const agentSel = document.getElementById('todo-agent-select');
+  const curAgent = agentSel.value;
+  agentSel.innerHTML = '<option value="">No agent</option>';
+  for (const agent of config.agents) {
+    agentSel.innerHTML += `<option value="${agent.id}">${agent.shortName}</option>`;
+  }
+  agentSel.value = curAgent || '';
+
+  // Goal select
+  const goalSel = document.getElementById('todo-goal-select');
+  const curGoal = goalSel.value;
+  goalSel.innerHTML = '<option value="">No goal</option>';
+  for (const goal of todosData.goals) {
+    goalSel.innerHTML += `<option value="${goal.id}">${goal.title}</option>`;
+  }
+  goalSel.value = curGoal || '';
+}
+
+function addTodo() {
+  const input = document.getElementById('todo-input');
+  const text = input.value.trim();
+  if (!text) return;
+  const agentId = document.getElementById('todo-agent-select').value || null;
+  const goalId = document.getElementById('todo-goal-select').value || null;
+
+  todosData.todos.push({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    text,
+    agentId,
+    goalId,
+    status: 'todo',
+    createdAt: Date.now(),
+    completedAt: null,
+    summary: null,
+  });
+  saveTodosData();
+  input.value = '';
+  renderTodosList();
+  input.focus();
+}
+
+function toggleTodoStatus(todoId) {
+  const todo = todosData.todos.find(t => t.id === todoId);
+  if (!todo) return;
+  if (todo.status === 'todo') {
+    todo.status = 'done';
+    todo.completedAt = Date.now();
+  } else {
+    todo.status = 'todo';
+    todo.completedAt = null;
+  }
+  saveTodosData();
+  renderTodosList();
+}
+
+function deleteTodo(todoId) {
+  todosData.todos = todosData.todos.filter(t => t.id !== todoId);
+  saveTodosData();
+  renderTodosList();
+}
+
+function editTodoInline(todoId) {
+  const todo = todosData.todos.find(t => t.id === todoId);
+  if (!todo) return;
+  const el = document.querySelector(`.todo-item[data-todo-id="${todoId}"] .todo-text`);
+  if (!el) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'todo-edit-input';
+  input.value = todo.text;
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+  const save = () => {
+    todo.text = input.value.trim() || todo.text;
+    saveTodosData();
+    renderTodosList();
+  };
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); save(); }
+    if (e.key === 'Escape') renderTodosList();
+  });
+}
+
+function renderTodoItem(todo) {
+  const agent = config.agents.find(a => a.id === todo.agentId);
+  const agentBadge = agent
+    ? `<span class="todo-agent-badge" style="background:${agent.color}">${agent.shortName}</span>`
+    : '';
+  const summaryHtml = todo.summary
+    ? `<div class="todo-summary">${truncate(todo.summary, 60)}</div>`
+    : '';
+  const checked = todo.status === 'done' ? 'checked' : '';
+  const doneClass = todo.status === 'done' ? ' todo-done' : '';
+
+  return `
+    <div class="todo-item${doneClass}" data-todo-id="${todo.id}">
+      <label class="todo-checkbox">
+        <input type="checkbox" ${checked} />
+        <span class="todo-checkmark"></span>
+      </label>
+      <div class="todo-content">
+        <div class="todo-text">${todo.text}</div>
+        ${summaryHtml}
+        <div class="todo-meta">
+          ${agentBadge}
+          <span class="todo-time">${formatTimeAgo(todo.createdAt)}</span>
+        </div>
+      </div>
+      <button class="todo-delete" title="Delete">&times;</button>
+    </div>
+  `;
+}
+
+function renderTodosList() {
+  const listEl = document.getElementById('todos-list');
+  listEl.innerHTML = '';
+
+  const activeTodos = todosData.todos.filter(t => t.status === 'todo');
+  const doneTodos = todosData.todos.filter(t => t.status === 'done');
+
+  // Group active by goal
+  const goalMap = new Map();
+  const ungrouped = [];
+  for (const todo of activeTodos) {
+    if (todo.goalId) {
+      if (!goalMap.has(todo.goalId)) goalMap.set(todo.goalId, []);
+      goalMap.get(todo.goalId).push(todo);
+    } else {
+      ungrouped.push(todo);
+    }
+  }
+
+  // Render goal groups
+  for (const goal of todosData.goals) {
+    const todos = goalMap.get(goal.id);
+    if (!todos || todos.length === 0) continue;
+    const section = document.createElement('div');
+    section.className = 'todo-goal-group';
+    section.innerHTML = `
+      <div class="todo-goal-header" style="border-left-color:${goal.color || 'var(--accent)'}">
+        <span class="todo-goal-title">${goal.title}</span>
+        <span class="todo-goal-count">${todos.length}</span>
+      </div>
+      <div class="todo-goal-items">${todos.map(renderTodoItem).join('')}</div>
+    `;
+    listEl.appendChild(section);
+  }
+
+  // Ungrouped
+  if (ungrouped.length > 0) {
+    const section = document.createElement('div');
+    section.className = 'todo-goal-group';
+    if (goalMap.size > 0) {
+      section.innerHTML = `<div class="todo-goal-header"><span class="todo-goal-title">Ungrouped</span><span class="todo-goal-count">${ungrouped.length}</span></div>`;
+    }
+    section.innerHTML += `<div class="todo-goal-items">${ungrouped.map(renderTodoItem).join('')}</div>`;
+    listEl.appendChild(section);
+  }
+
+  // Done section
+  if (doneTodos.length > 0) {
+    const section = document.createElement('div');
+    section.className = 'todo-done-group';
+    section.innerHTML = `
+      <div class="todo-done-header">
+        <span>Done (${doneTodos.length})</span>
+        <svg class="todo-done-chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="todo-done-items hidden">${doneTodos.map(renderTodoItem).join('')}</div>
+    `;
+    listEl.appendChild(section);
+  }
+
+  if (activeTodos.length === 0 && doneTodos.length === 0) {
+    listEl.innerHTML = '<div class="todos-empty">No todos yet</div>';
+  }
+
+  // Wire up events via delegation
+  listEl.querySelectorAll('.todo-checkbox input').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const todoId = cb.closest('.todo-item').dataset.todoId;
+      toggleTodoStatus(todoId);
+    });
+  });
+  listEl.querySelectorAll('.todo-text').forEach(el => {
+    el.addEventListener('dblclick', () => {
+      const todoId = el.closest('.todo-item').dataset.todoId;
+      editTodoInline(todoId);
+    });
+  });
+  listEl.querySelectorAll('.todo-delete').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const todoId = btn.closest('.todo-item').dataset.todoId;
+      deleteTodo(todoId);
+    });
+  });
+  listEl.querySelectorAll('.todo-done-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const items = hdr.nextElementSibling;
+      items.classList.toggle('hidden');
+      hdr.querySelector('.todo-done-chevron')?.classList.toggle('expanded');
+    });
+  });
+}
+
+// --- Goals Editor ---
+
+function showGoalsEditor() {
+  document.getElementById('goals-editor').classList.remove('hidden');
+  document.getElementById('todos-list').classList.add('hidden');
+  document.getElementById('todos-add').classList.add('hidden');
+  renderGoalsList();
+}
+
+function hideGoalsEditor() {
+  document.getElementById('goals-editor').classList.add('hidden');
+  document.getElementById('todos-list').classList.remove('hidden');
+  document.getElementById('todos-add').classList.remove('hidden');
+  populateTodoSelects();
+  renderTodosList();
+}
+
+function addGoal() {
+  const input = document.getElementById('goal-input');
+  const title = input.value.trim();
+  if (!title) return;
+  const colors = ['#ef6b6b', '#5b8def', '#6befa0', '#a06bef', '#f59e0b', '#ec4899', '#14b8a6'];
+  todosData.goals.push({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    title,
+    color: colors[todosData.goals.length % colors.length],
+    order: todosData.goals.length,
+  });
+  saveTodosData();
+  input.value = '';
+  renderGoalsList();
+}
+
+function deleteGoal(goalId) {
+  todosData.goals = todosData.goals.filter(g => g.id !== goalId);
+  // Unlink todos from deleted goal
+  for (const todo of todosData.todos) {
+    if (todo.goalId === goalId) todo.goalId = null;
+  }
+  saveTodosData();
+  renderGoalsList();
+}
+
+function renderGoalsList() {
+  const listEl = document.getElementById('goals-list');
+  listEl.innerHTML = '';
+  if (todosData.goals.length === 0) {
+    listEl.innerHTML = '<div class="todos-empty">No goals yet</div>';
+    return;
+  }
+  for (const goal of todosData.goals) {
+    const count = todosData.todos.filter(t => t.goalId === goal.id && t.status === 'todo').length;
+    const item = document.createElement('div');
+    item.className = 'goal-item';
+    item.innerHTML = `
+      <div class="goal-color-dot" style="background:${goal.color}"></div>
+      <div class="goal-info">
+        <div class="goal-title">${goal.title}</div>
+        <div class="goal-count">${count} todo${count !== 1 ? 's' : ''}</div>
+      </div>
+      <button class="goal-delete" data-goal-id="${goal.id}" title="Delete">&times;</button>
+    `;
+    listEl.appendChild(item);
+  }
+  listEl.querySelectorAll('.goal-delete').forEach(btn => {
+    btn.addEventListener('click', () => deleteGoal(btn.dataset.goalId));
+  });
+}
+
+// --- Inbox ---
+
+async function loadInboxData() {
+  try { inboxItems = await api.loadInbox(); }
+  catch { inboxItems = []; }
+  updateInboxBadge();
+}
+
+function updateInboxBadge() {
+  const badge = document.getElementById('inbox-badge');
+  const unread = inboxItems.filter(i => !i.read).length;
+  if (unread > 0) {
+    badge.textContent = unread > 99 ? '99+' : unread;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+function toggleInbox() {
+  const panel = document.getElementById('inbox-panel');
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    if (activeAgentId) terminals.get(activeAgentId)?.focus();
+    return;
+  }
+  closeAllPanels();
+  panel.classList.remove('hidden');
+  renderInboxList();
+}
+
+function renderInboxList() {
+  const listEl = document.getElementById('inbox-list');
+  listEl.innerHTML = '';
+
+  if (inboxItems.length === 0) {
+    listEl.innerHTML = '<div class="inbox-empty">No notifications</div>';
+    return;
+  }
+
+  for (const item of inboxItems) {
+    const agent = config.agents.find(a => a.id === item.agentId);
+    // Also check across workspaces
+    const agentColor = agent?.color || '#5a5a78';
+    const agentLabel = agent?.shortName || item.agentId || '';
+
+    const typeIcon = item.type === 'exit'
+      ? '<svg viewBox="0 0 24 24" class="inbox-icon exit"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>'
+      : '<svg viewBox="0 0 24 24" class="inbox-icon idle"><circle cx="12" cy="12" r="6" fill="currentColor"/></svg>';
+
+    const readClass = item.read ? ' inbox-read' : '';
+    const summaryHtml = item.summary ? `<div class="inbox-summary">${truncate(item.summary, 80)}</div>` : '';
+
+    const el = document.createElement('div');
+    el.className = `inbox-item${readClass}`;
+    el.dataset.inboxId = item.id;
+    el.innerHTML = `
+      ${typeIcon}
+      <div class="inbox-content">
+        <div class="inbox-title">
+          <span class="inbox-agent-dot" style="background:${agentColor}"></span>
+          ${item.title}
+        </div>
+        <div class="inbox-detail">${item.detail}</div>
+        ${summaryHtml}
+      </div>
+      <div class="inbox-time">${formatTimeAgo(item.timestamp)}</div>
+    `;
+
+    el.addEventListener('click', () => {
+      // Mark as read
+      item.read = true;
+      api.saveInbox(inboxItems);
+      updateInboxBadge();
+      el.classList.add('inbox-read');
+
+      // Switch to that agent if it exists in current workspace
+      if (agent) {
+        selectAgent(item.agentId);
+        document.getElementById('inbox-panel').classList.add('hidden');
+      }
+    });
+
+    listEl.appendChild(el);
+  }
+}
+
+function clearInbox() {
+  inboxItems = [];
+  api.clearInbox();
+  updateInboxBadge();
+  renderInboxList();
+}
+
+// --- Enhanced Logs (Run Records) ---
+
+async function loadRunsForAgent(agentId) {
+  return api.listRuns(agentId);
+}
+
+async function showLogsWithRuns() {
+  if (!activeAgentId) return;
+  const panel = document.getElementById('logs-panel');
+  const listEl = document.getElementById('logs-list');
+  const viewerEl = document.getElementById('log-viewer');
+
+  // Reset to list view
+  viewerEl.classList.add('hidden');
+  listEl.classList.remove('hidden');
+  document.getElementById('btn-logs-back').classList.add('hidden');
+  document.getElementById('logs-title').textContent = 'Session History';
+
+  // Load both run records and raw logs for this agent
+  const runs = await loadRunsForAgent(activeAgentId);
+  const logs = await api.getLogs(activeAgentId);
+
+  listEl.innerHTML = '';
+
+  if (runs.length === 0 && logs.length === 0) {
+    listEl.innerHTML = '<div class="logs-empty"><p>No sessions yet</p><p class="logs-empty-sub">Start the agent with Cmd+R</p></div>';
+    return;
+  }
+
+  // Build a merged list: run records first (they have richer data), then orphan logs
+  const runLogPaths = new Set(runs.map(r => r.logPath));
+
+  // Render run records as rich cards
+  for (const run of runs) {
+    const agent = config.agents.find(a => a.id === run.agentId);
+    const statusIcon = run.exitCode === 0
+      ? '<span class="run-status success">&#10003;</span>'
+      : run.exitCode != null
+        ? `<span class="run-status error">&#10007;</span>`
+        : '<span class="run-status running">&#8226;</span>';
+    const duration = run.durationSec != null ? formatDurationShort(run.durationSec) : 'running';
+    const date = new Date(run.startedAt);
+    const dateStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const timeStr = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const summaryHtml = run.summary ? `<div class="run-summary">${truncate(run.summary, 80)}</div>` : '';
+    const triggerLabel = run.trigger === 'resume' ? 'resumed' : run.trigger || 'manual';
+
+    const card = document.createElement('div');
+    card.className = 'run-card';
+    card.innerHTML = `
+      <div class="run-card-header">
+        ${statusIcon}
+        <span class="run-duration">${duration}</span>
+        <span class="run-trigger">${triggerLabel}</span>
+      </div>
+      ${summaryHtml}
+      <div class="run-card-meta">${dateStr} at ${timeStr}</div>
+    `;
+    card.addEventListener('click', () => {
+      if (run.logPath) {
+        const logObj = { path: run.logPath, name: run.logPath.split('/').pop() };
+        viewLog(logObj);
+      }
+    });
+    listEl.appendChild(card);
+  }
+
+  // Render any orphan logs (logs without a run record - from before this feature)
+  const orphanLogs = logs.filter(l => !runLogPaths.has(l.path));
+  if (orphanLogs.length > 0 && runs.length > 0) {
+    const divider = document.createElement('div');
+    divider.className = 'run-divider';
+    divider.textContent = 'Older sessions';
+    listEl.appendChild(divider);
+  }
+  for (const log of orphanLogs) {
+    const item = document.createElement('div');
+    item.className = 'log-item';
+    const date = new Date(log.mtime);
+    const dateStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const timeStr = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    item.innerHTML = `
+      <div class="log-item-date">${dateStr} at ${timeStr}</div>
+      <div class="log-item-meta"><span>${formatSize(log.size)}</span></div>
     `;
     item.addEventListener('click', () => viewLog(log));
     listEl.appendChild(item);

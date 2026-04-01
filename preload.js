@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('api', {
   readFile:       (p) => ipcRenderer.invoke('files:read', p),
   writeFile:      (p, c) => ipcRenderer.invoke('files:write', p, c),
   revealFile:     (p) => ipcRenderer.invoke('files:reveal', p),
+  resolveFilePath: (id, p) => ipcRenderer.invoke('files:resolve-path', id, p),
 
   getPathForFile: (file) => webUtils.getPathForFile(file),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
@@ -36,12 +37,35 @@ contextBridge.exposeInMainWorld('api', {
   saveBug: (bug) => ipcRenderer.invoke('bugs:save', bug),
   openAgentCwd: (id) => ipcRenderer.invoke('agent:open-cwd', id),
   cloneGithub: (url) => ipcRenderer.invoke('agent:clone-github', url),
+
+  // Workspaces
+  getWorkspaces:      () => ipcRenderer.invoke('workspaces:get'),
+  setActiveWorkspace: (id) => ipcRenderer.invoke('workspaces:set-active', id),
+  createWorkspace:    (opts) => ipcRenderer.invoke('workspaces:create', opts),
+  updateWorkspace:    (id, updates) => ipcRenderer.invoke('workspaces:update', id, updates),
+  deleteWorkspace:    (id) => ipcRenderer.invoke('workspaces:delete', id),
+  checkAgentId:       (id) => ipcRenderer.invoke('workspaces:check-agent-id', id),
+
   listCrons: () => ipcRenderer.invoke('crons:list'),
   toggleCron: (label, enable) => ipcRenderer.invoke('crons:toggle', label, enable),
   cronLogs: (logPath) => ipcRenderer.invoke('crons:logs', logPath),
   cronHistory: () => ipcRenderer.invoke('crons:history'),
 
+  // Todos
+  loadTodos: () => ipcRenderer.invoke('todos:load'),
+  saveTodos: (data) => ipcRenderer.invoke('todos:save', data),
+
+  // Inbox
+  loadInbox: () => ipcRenderer.invoke('inbox:load'),
+  saveInbox: (items) => ipcRenderer.invoke('inbox:save', items),
+  clearInbox: () => ipcRenderer.invoke('inbox:clear'),
+
+  // Runs
+  listRuns: (agentId) => ipcRenderer.invoke('runs:list', agentId),
+  getRun: (runId) => ipcRenderer.invoke('runs:get', runId),
+
   onData:  (cb) => ipcRenderer.on('agent:data', (_, id, data) => cb(id, data)),
   onExit:  (cb) => ipcRenderer.on('agent:exit', (_, id, code) => cb(id, code)),
-  onFocus: (cb) => ipcRenderer.on('agent:focus', (_, id) => cb(id)),
+  onFocus: (cb) => ipcRenderer.on('agent:focus', (_, id, wsId) => cb(id, wsId)),
+  onInbox: (cb) => ipcRenderer.on('inbox:new', (_, item) => cb(item)),
 });
