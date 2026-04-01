@@ -683,6 +683,7 @@ ipcMain.handle('workspaces:update', (_, workspaceId, updates) => {
   if (!ws) return null;
   if (updates.name !== undefined) ws.name = updates.name;
   if (updates.color !== undefined) ws.color = updates.color;
+  if (updates.icon !== undefined) ws.icon = updates.icon || null;
   if (updates.order !== undefined) ws.order = updates.order;
   if (updates.lastSelectedAgentId !== undefined) ws.lastSelectedAgentId = updates.lastSelectedAgentId;
   saveWorkspacesConfig(wConfig);

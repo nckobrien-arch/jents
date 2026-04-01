@@ -203,6 +203,7 @@ async function createStarterPack(pack) {
 
 const WS_COLORS = ['#5b8def', '#ef6b6b', '#6befa0', '#a06bef', '#f59e0b', '#ec4899', '#14b8a6', '#f97316', '#8b5cf6', '#06b6d4'];
 let selectedWsColor = WS_COLORS[0];
+let selectedWsIcon = null; // data URL or null
 let editingWorkspaceId = null;
 
 function renderWorkspaceStrip() {
@@ -221,8 +222,13 @@ function renderWorkspaceStrip() {
     const item = document.createElement('button');
     item.className = 'workspace-avatar' + (ws.id === activeWorkspaceId ? ' active' : '');
     item.dataset.workspaceId = ws.id;
-    item.style.background = ws.color || '#5b8def';
-    item.textContent = ws.name.charAt(0).toUpperCase();
+    if (ws.icon) {
+      item.style.background = `url(${ws.icon}) center/cover no-repeat`;
+      item.textContent = '';
+    } else {
+      item.style.background = ws.color || '#5b8def';
+      item.textContent = ws.name.charAt(0).toUpperCase();
+    }
     item.title = ws.name;
 
     if (workspaceUnread.get(ws.id) && ws.id !== activeWorkspaceId) {
@@ -413,8 +419,10 @@ function openWorkspaceModal(mode, ws) {
   confirmBtn.textContent = mode === 'edit' ? 'Save' : 'Create';
   nameInput.value = mode === 'edit' ? ws.name : '';
   selectedWsColor = mode === 'edit' ? (ws.color || WS_COLORS[0]) : WS_COLORS[Math.floor(Math.random() * WS_COLORS.length)];
+  selectedWsIcon = mode === 'edit' ? (ws.icon || null) : null;
 
   renderWsColorPicker();
+  updateWsIconPreview();
   modal.classList.remove('hidden');
   nameInput.focus();
 }
@@ -435,6 +443,43 @@ function renderWsColorPicker() {
   }
 }
 
+function updateWsIconPreview() {
+  const preview = document.getElementById('workspace-icon-preview');
+  const clearBtn = document.getElementById('btn-workspace-icon-clear');
+  if (selectedWsIcon) {
+    preview.style.background = `url(${selectedWsIcon}) center/cover no-repeat`;
+    preview.textContent = '';
+    clearBtn.classList.remove('hidden');
+  } else {
+    preview.style.background = selectedWsColor;
+    preview.textContent = (document.getElementById('workspace-name-input').value || '?').charAt(0).toUpperCase();
+    clearBtn.classList.add('hidden');
+  }
+}
+
+function handleWsIconFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    // Resize to 128x128 to keep data URL small
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      const size = Math.min(img.width, img.height);
+      const sx = (img.width - size) / 2;
+      const sy = (img.height - size) / 2;
+      ctx.drawImage(img, sx, sy, size, size, 0, 0, 128, 128);
+      selectedWsIcon = canvas.toDataURL('image/png');
+      updateWsIconPreview();
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 function closeWorkspaceModal() {
   document.getElementById('workspace-modal').classList.add('hidden');
   editingWorkspaceId = null;
@@ -444,11 +489,12 @@ async function confirmWorkspaceModal() {
   const name = document.getElementById('workspace-name-input').value.trim();
   if (!name) { showToast('Workspace name is required', 'error'); return; }
 
+  const editId = editingWorkspaceId;
   closeWorkspaceModal();
 
-  if (editingWorkspaceId) {
+  if (editId) {
     // Edit mode - rename/recolor
-    workspaces = await api.updateWorkspace(editingWorkspaceId, { name, color: selectedWsColor });
+    workspaces = await api.updateWorkspace(editId, { name, color: selectedWsColor, icon: selectedWsIcon || '' });
     renderWorkspaceStrip();
     showToast(`Workspace renamed to "${name}"`, 'success');
   } else {
@@ -1851,6 +1897,17 @@ function setupEventListeners() {
   document.getElementById('btn-workspace-cancel').addEventListener('click', closeWorkspaceModal);
   document.getElementById('btn-workspace-confirm').addEventListener('click', confirmWorkspaceModal);
   document.getElementById('workspace-modal-backdrop').addEventListener('click', closeWorkspaceModal);
+  document.getElementById('btn-workspace-icon-upload').addEventListener('click', () => {
+    document.getElementById('workspace-icon-file').click();
+  });
+  document.getElementById('workspace-icon-file').addEventListener('change', (e) => {
+    if (e.target.files[0]) handleWsIconFile(e.target.files[0]);
+    e.target.value = '';
+  });
+  document.getElementById('btn-workspace-icon-clear').addEventListener('click', () => {
+    selectedWsIcon = null;
+    updateWsIconPreview();
+  });
   document.getElementById('workspace-name-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); confirmWorkspaceModal(); }
     if (e.key === 'Escape') closeWorkspaceModal();
