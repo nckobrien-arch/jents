@@ -102,6 +102,8 @@ async function init() {
   await loadTodosData();
   await loadInboxData();
   runsData = await api.listRuns();
+  const muted = await api.getMuted();
+  updateMuteUI(muted);
   renderWorkspaceStrip();
   renderSidebar();
   setupTerminals();
@@ -205,6 +207,23 @@ const WS_COLORS = ['#5b8def', '#ef6b6b', '#6befa0', '#a06bef', '#f59e0b', '#ec48
 let selectedWsColor = WS_COLORS[0];
 let selectedWsIcon = null; // data URL or null
 let editingWorkspaceId = null;
+
+function updateMuteUI(muted) {
+  const btn = document.getElementById('btn-mute-notifications');
+  const iconOn = document.getElementById('mute-icon-on');
+  const iconOff = document.getElementById('mute-icon-off');
+  if (muted) {
+    iconOn.classList.add('hidden');
+    iconOff.classList.remove('hidden');
+    btn.title = 'Unmute notifications';
+    btn.classList.add('muted');
+  } else {
+    iconOn.classList.remove('hidden');
+    iconOff.classList.add('hidden');
+    btn.title = 'Mute notifications';
+    btn.classList.remove('muted');
+  }
+}
 
 function renderWorkspaceStrip() {
   const list = document.getElementById('workspace-list');
@@ -603,7 +622,6 @@ function renderSidebar() {
         ${badgesHtml}
       </div>
       ${removeHtml}
-      <div class="unread-badge" style="background:${agent.color}"></div>
       <div class="status-dot ${state}" data-status="${agent.id}"></div>
     `;
 
@@ -1887,6 +1905,13 @@ function setupEventListeners() {
         } else {
           startAgent(activeAgentId);
         }
+        return;
+      }
+
+      // Cmd+N new instance
+      if (e.key === 'n' && !e.shiftKey) {
+        e.preventDefault();
+        duplicateAgent();
         return;
       }
     }
@@ -3627,9 +3652,18 @@ function toggleSidebar() {
 }
 
 document.getElementById('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
+document.getElementById('btn-mute-notifications').addEventListener('click', async () => {
+  const current = await api.getMuted();
+  const next = !current;
+  await api.setMuted(next);
+  updateMuteUI(next);
+});
 document.getElementById('btn-add-agent').addEventListener('click', openAddAgentModal);
 document.getElementById('btn-duplicate-agent').addEventListener('click', duplicateAgent);
 document.getElementById('btn-welcome-add').addEventListener('click', openAddAgentModal);
+document.getElementById('btn-welcome-skip').addEventListener('click', () => {
+  document.getElementById('welcome-screen').classList.add('hidden');
+});
 document.getElementById('btn-add-cancel').addEventListener('click', closeAddAgentModal);
 document.getElementById('btn-add-confirm').addEventListener('click', confirmAddAgent);
 document.getElementById('add-agent-backdrop').addEventListener('click', closeAddAgentModal);
@@ -3690,7 +3724,7 @@ const COMMANDS = [
   { label: 'Configure Agent', shortcut: [], action: () => toggleConfigure() },
   { label: 'Search Terminal', shortcut: ['Cmd', 'F'], action: () => openTerminalSearch() },
   { label: 'Add Agent', shortcut: [], action: () => openAddAgentModal() },
-  { label: 'Duplicate Agent', shortcut: [], action: () => duplicateAgent() },
+  { label: 'New Instance', shortcut: ['Cmd', 'N'], action: () => duplicateAgent() },
   { label: 'Clear Terminal', shortcut: [], action: () => armClear() },
   { label: 'Copy Last Response', shortcut: [], action: () => copyLastResponse() },
   { label: 'Increase Font Size', shortcut: ['Cmd', '+'], action: () => changeFontSize(1) },

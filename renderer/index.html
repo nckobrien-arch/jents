@@ -34,10 +34,10 @@
         <button class="toolbar-btn" id="btn-start" title="Start new session (Cmd+R)">
           <svg viewBox="0 0 24 24"><polygon points="6,3 20,12 6,21" fill="currentColor" stroke="none"/></svg>
         </button>
-        <button class="toolbar-btn" id="btn-resume" title="Resume last session">
+        <button class="toolbar-btn" id="btn-resume" title="Resume last session (Cmd+R)">
           <svg viewBox="0 0 24 24"><path d="M21 2v6h-6"/><path d="M21 13a9 9 0 1 1-3-7.7L21 8"/></svg>
         </button>
-        <button class="toolbar-btn" id="btn-restart" title="Restart session">
+        <button class="toolbar-btn" id="btn-restart" title="Restart session (Cmd+R)">
           <svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
         </button>
         <button class="toolbar-btn danger" id="btn-stop" title="Stop session">
@@ -64,7 +64,7 @@
         <button class="toolbar-btn" id="btn-crons" title="Scheduled tasks">
           <svg viewBox="0 0 24 24"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
         </button>
-        <button class="toolbar-btn" id="btn-files" title="Recent files (Cmd+F)">
+        <button class="toolbar-btn" id="btn-files" title="Recent files (Cmd+Shift+F)">
           <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         </button>
         <button class="toolbar-btn" id="btn-reader" title="Reader view (Cmd+D)">
@@ -90,6 +90,10 @@
           <span id="workspace-name-label">Default</span>
           <svg class="chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
+        <button id="btn-mute-notifications" title="Mute notifications">
+          <svg id="mute-icon-on" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          <svg id="mute-icon-off" viewBox="0 0 24 24" class="hidden"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+        </button>
         <div id="workspace-dropdown" class="hidden">
           <div id="workspace-dropdown-list"></div>
           <div class="workspace-dropdown-divider"></div>
@@ -105,7 +109,7 @@
           <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           <span class="sidebar-btn-label">Add Agent</span>
         </button>
-        <button id="btn-duplicate-agent" title="New instance of selected agent">
+        <button id="btn-duplicate-agent" title="New instance (Cmd+N)">
           <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           <span class="sidebar-btn-label">New Instance</span>
         </button>
@@ -113,7 +117,7 @@
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <span class="sidebar-btn-label">Report Bug</span>
         </button>
-        <button id="btn-sidebar-toggle" title="Collapse sidebar">
+        <button id="btn-sidebar-toggle" title="Collapse sidebar (Cmd+B)">
           <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
           <span class="sidebar-btn-label">Collapse</span>
         </button>
@@ -374,6 +378,7 @@
         <div id="starter-packs"></div>
         <div class="welcome-divider"><span>or</span></div>
         <button id="btn-welcome-add" class="welcome-btn-secondary">Add a single agent</button>
+        <button id="btn-welcome-skip" class="welcome-btn-skip">Skip for now</button>
         <p class="welcome-credit">Starter packs inspired by <a href="https://github.com/garrytan/gstack" target="_blank">gstack</a> by Garry Tan</p>
       </div>
     </div>

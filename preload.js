@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld('api', {
   saveBug: (bug) => ipcRenderer.invoke('bugs:save', bug),
   openAgentCwd: (id) => ipcRenderer.invoke('agent:open-cwd', id),
   cloneGithub: (url) => ipcRenderer.invoke('agent:clone-github', url),
+  getMuted: () => ipcRenderer.invoke('notifications:get-muted'),
+  setMuted: (muted) => ipcRenderer.invoke('notifications:set-muted', muted),
 
   // Workspaces
   getWorkspaces:      () => ipcRenderer.invoke('workspaces:get'),

@@ -284,7 +284,10 @@ function createWindow() {
 
 // --- Notifications ---
 
+let notificationsMuted = false;
+
 function sendNotification(agentId, title, body) {
+  if (notificationsMuted) return;
   if (!Notification.isSupported()) return;
 
   const n = new Notification({ title, body, silent: false });
@@ -770,6 +773,9 @@ ipcMain.handle('files:resolve-path', (_, agentId, filePath) => {
 ipcMain.handle('shell:open-external', (_, url) => {
   shell.openExternal(url);
 });
+
+ipcMain.handle('notifications:get-muted', () => notificationsMuted);
+ipcMain.handle('notifications:set-muted', (_, muted) => { notificationsMuted = muted; return muted; });
 
 ipcMain.handle('bugs:save', (_, bug) => {
   ensureDir(USER_DATA_DIR);
