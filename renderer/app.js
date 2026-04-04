@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import TurndownService from 'turndown';
 
 const { api } = window;
@@ -20,6 +21,7 @@ const fitAddons = new Map();
 const searchAddons = new Map();
 const agentStates = new Map();
 const hasUnread = new Map();
+const agentHasNotification = new Set(); // agents with active desktop notifications
 let terminalFontSize = 13;
 
 // Workspace state
@@ -145,9 +147,9 @@ function renderStarterPacks() {
     card.innerHTML = `
       <div class="pack-dots">${dots}</div>
       <div class="pack-info">
-        <div class="pack-name">${pack.name}</div>
-        <div class="pack-desc">${pack.desc}</div>
-        <div class="pack-agents">${pack.agents.map(a => a.name).join(' + ')}</div>
+        <div class="pack-name">${escapeHtml(pack.name)}</div>
+        <div class="pack-desc">${escapeHtml(pack.desc)}</div>
+        <div class="pack-agents">${pack.agents.map(a => escapeHtml(a.name)).join(' + ')}</div>
       </div>
     `;
     card.addEventListener('click', () => createStarterPack(pack));
@@ -622,7 +624,7 @@ function renderSidebar() {
         ${badgesHtml}
       </div>
       ${removeHtml}
-      <div class="status-dot ${state}" data-status="${escapeHtml(agent.id)}"></div>
+      <div class="status-dot ${state}${agentHasNotification.has(agent.id) ? ' notified' : ''}" data-status="${escapeHtml(agent.id)}"></div>
     `;
 
     item.addEventListener('click', (e) => {
@@ -677,16 +679,8 @@ function renderSidebar() {
 }
 
 async function reorderAgent(fromId, toId) {
-  const fromIdx = config.agents.findIndex(a => a.id === fromId);
-  const toIdx = config.agents.findIndex(a => a.id === toId);
-  if (fromIdx < 0 || toIdx < 0) return;
-
-  // Move the agent in the array
-  const [moved] = config.agents.splice(fromIdx, 1);
-  config.agents.splice(toIdx, 0, moved);
-
-  // Persist and re-render
-  await api.saveConfig(config);
+  const updated = await api.reorderAgents(fromId, toId);
+  if (updated) config = updated;
   renderSidebar();
   if (activeAgentId) selectAgent(activeAgentId);
 }
@@ -829,8 +823,9 @@ function selectAgent(agentId) {
     }
   });
 
-  // Close logs panel when switching agents
+  // Close context-dependent panels when switching agents
   document.getElementById('logs-panel').classList.add('hidden');
+  document.getElementById('configure-panel').classList.add('hidden');
 
   // Reset armed confirmation states
   stopArmed = false;
@@ -852,7 +847,7 @@ function setAgentState(agentId, state) {
   agentStates.set(agentId, state);
   if (agentId === activeAgentId) updateStatusUI(agentId);
   const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
-  if (dot) dot.className = `status-dot ${state}`;
+  if (dot) dot.className = `status-dot ${state}${agentHasNotification.has(agentId) ? ' notified' : ''}`;
 }
 
 function updateStatusUI(agentId) {
@@ -865,7 +860,7 @@ function updateStatusUI(agentId) {
   }
 
   const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
-  if (dot) dot.className = `status-dot ${state}`;
+  if (dot) dot.className = `status-dot ${state}${agentHasNotification.has(agentId) ? ' notified' : ''}`;
 
   const isRunning = state === 'running';
   document.getElementById('btn-start').style.display = isRunning ? 'none' : 'flex';
@@ -1178,10 +1173,10 @@ async function loadFiles() {
     const size = formatSize(file.size);
 
     item.innerHTML = `
-      <div class="file-icon" data-ext="${ext}">${ext.slice(0, 3)}</div>
+      <div class="file-icon" data-ext="${escapeHtml(ext)}">${escapeHtml(ext.slice(0, 3))}</div>
       <div class="file-details">
-        <div class="file-name">${file.name}</div>
-        <div class="file-path">${file.relativePath}</div>
+        <div class="file-name">${escapeHtml(file.name)}</div>
+        <div class="file-path">${escapeHtml(file.relativePath)}</div>
         <div class="file-meta">
           <span class="file-agent-badge" style="background:${sanitizeColor(file.agentColor)}">${escapeHtml(file.agentName)}</span>
           <span>${timeAgo}</span>
@@ -1347,7 +1342,7 @@ function openReader() {
 function showReaderContent(title, markdown) {
   marked.setOptions({ breaks: false, gfm: true });
 
-  const html = marked.parse(markdown);
+  const html = DOMPurify.sanitize(marked.parse(markdown));
   const contentEl = document.getElementById('reader-content');
   contentEl.innerHTML = `<div class="prose">${html}</div>`;
   contentEl.dataset.rawMarkdown = markdown;
@@ -1361,6 +1356,7 @@ function showReaderContent(title, markdown) {
   document.getElementById('btn-reader-save').style.display = 'none';
   document.getElementById('btn-reader-cancel-edit').style.display = 'none';
   document.getElementById('btn-reader-copy').style.display = 'flex';
+  document.getElementById('btn-reader-copy-slack').style.display = 'flex';
 
   readerOpen = true;
   document.getElementById('reader').classList.remove('hidden');
@@ -1410,6 +1406,7 @@ function enterReaderEdit() {
   // Swap toolbar buttons
   document.getElementById('btn-reader-edit').style.display = 'none';
   document.getElementById('btn-reader-copy').style.display = 'none';
+  document.getElementById('btn-reader-copy-slack').style.display = 'none';
   document.getElementById('btn-reader-save').style.display = 'flex';
   document.getElementById('btn-reader-cancel-edit').style.display = 'flex';
 
@@ -1451,12 +1448,13 @@ function cancelReaderEdit() {
 
   // Re-render original content (discard edits)
   marked.setOptions({ breaks: false, gfm: true });
-  contentEl.innerHTML = `<div class="prose">${marked.parse(readerOriginalContent)}</div>`;
+  contentEl.innerHTML = `<div class="prose">${DOMPurify.sanitize(marked.parse(readerOriginalContent))}</div>`;
   contentEl.dataset.rawMarkdown = readerOriginalContent;
 
   // Restore toolbar buttons
   document.getElementById('btn-reader-edit').style.display = readerFilePath ? 'flex' : 'none';
   document.getElementById('btn-reader-copy').style.display = 'flex';
+  document.getElementById('btn-reader-copy-slack').style.display = 'flex';
   document.getElementById('btn-reader-save').style.display = 'none';
   document.getElementById('btn-reader-cancel-edit').style.display = 'none';
 
@@ -1494,6 +1492,40 @@ async function copyReaderContent() {
 
   try {
     await navigator.clipboard.writeText(markdown);
+    btn.classList.add('copied');
+    setTimeout(() => btn.classList.remove('copied'), 1500);
+  } catch {
+    showToast('Copy failed', 'error');
+  }
+}
+
+async function copyForSlack() {
+  const contentEl = document.getElementById('reader-content');
+  const proseEl = contentEl.querySelector('.prose');
+  const btn = document.getElementById('btn-reader-copy-slack');
+  if (!proseEl) return;
+
+  // Clone the prose HTML and clean it up for Slack pasting
+  const clone = proseEl.cloneNode(true);
+
+  // Convert headers to bold paragraphs (Slack messages don't render h1-h6)
+  clone.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
+    const p = document.createElement('p');
+    const strong = document.createElement('strong');
+    strong.textContent = h.textContent;
+    p.appendChild(strong);
+    h.replaceWith(p);
+  });
+
+  const html = clone.innerHTML;
+  const plainText = contentEl.dataset.rawMarkdown || proseEl.innerText;
+
+  try {
+    const htmlBlob = new Blob([html], { type: 'text/html' });
+    const textBlob = new Blob([plainText], { type: 'text/plain' });
+    await navigator.clipboard.write([
+      new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': textBlob })
+    ]);
     btn.classList.add('copied');
     setTimeout(() => btn.classList.remove('copied'), 1500);
   } catch {
@@ -1621,12 +1653,14 @@ function setupEventListeners() {
   document.getElementById('btn-reader').addEventListener('click', toggleReader);
   document.getElementById('btn-reader-close').addEventListener('click', closeReader);
   document.getElementById('btn-reader-copy').addEventListener('click', copyReaderContent);
+  document.getElementById('btn-reader-copy-slack').addEventListener('click', copyForSlack);
   document.getElementById('btn-reader-edit').addEventListener('click', enterReaderEdit);
   document.getElementById('btn-reader-save').addEventListener('click', saveReaderEdit);
   document.getElementById('btn-reader-cancel-edit').addEventListener('click', cancelReaderEdit);
   document.getElementById('btn-configure').addEventListener('click', toggleConfigure);
   document.getElementById('btn-close-configure').addEventListener('click', () => {
     document.getElementById('configure-panel').classList.add('hidden');
+    if (activeAgentId) terminals.get(activeAgentId)?.focus();
   });
   document.getElementById('btn-config-guide').addEventListener('click', () => {
     toggleHelp();
@@ -1634,6 +1668,7 @@ function setupEventListeners() {
   document.getElementById('btn-crons').addEventListener('click', toggleCrons);
   document.getElementById('btn-close-crons').addEventListener('click', () => {
     document.getElementById('crons-panel').classList.add('hidden');
+    if (activeAgentId) terminals.get(activeAgentId)?.focus();
   });
   document.getElementById('btn-crons-refresh').addEventListener('click', () => {
     if (cronsActiveTab === 'jobs') loadCronsList();
@@ -1680,6 +1715,7 @@ function setupEventListeners() {
   document.getElementById('btn-files').addEventListener('click', toggleFiles);
   document.getElementById('btn-close-files').addEventListener('click', () => {
     document.getElementById('files-panel').classList.add('hidden');
+    if (activeAgentId) terminals.get(activeAgentId)?.focus();
   });
   document.getElementById('btn-files-finder').addEventListener('click', () => {
     if (activeAgentId) api.openAgentCwd(activeAgentId);
@@ -1689,6 +1725,7 @@ function setupEventListeners() {
   // Logs panel
   document.getElementById('btn-close-logs').addEventListener('click', () => {
     document.getElementById('logs-panel').classList.add('hidden');
+    if (activeAgentId) terminals.get(activeAgentId)?.focus();
   });
   document.getElementById('btn-logs-back').addEventListener('click', showLogsWithRuns);
   document.getElementById('btn-log-copy').addEventListener('click', copyLogContent);
@@ -1703,23 +1740,34 @@ function setupEventListeners() {
     }
   });
 
-  // Window resize
-  let resizeTimeout;
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeTimeout);
-    resizeTimeout = setTimeout(() => {
-      if (!activeAgentId) return;
-      const fitAddon = fitAddons.get(activeAgentId);
-      if (fitAddon) {
-        fitAddon.fit();
-        const terminal = terminals.get(activeAgentId);
-        if (terminal) api.resize(activeAgentId, terminal.cols, terminal.rows);
-      }
-    }, 50);
+  // Desktop notification state -> status dot color
+  api.onNotification((agentId, active) => {
+    if (active) {
+      agentHasNotification.add(agentId);
+    } else {
+      agentHasNotification.delete(agentId);
+    }
+    const dot = document.querySelector(`.status-dot[data-status="${agentId}"]`);
+    if (dot) {
+      const state = agentStates.get(agentId) || 'stopped';
+      dot.className = `status-dot ${state}${active ? ' notified' : ''}`;
+    }
   });
 
-  // Drag-and-drop file paths into terminal
+  // Terminal resize observer - handles window resize, panel open/close, sidebar toggle
   const termContainer = document.getElementById('terminal-container');
+  const resizeObs = new ResizeObserver(() => {
+    if (!activeAgentId) return;
+    const fitAddon = fitAddons.get(activeAgentId);
+    if (fitAddon) {
+      fitAddon.fit();
+      const terminal = terminals.get(activeAgentId);
+      if (terminal && agentStates.get(activeAgentId) === 'running') {
+        api.resize(activeAgentId, terminal.cols, terminal.rows);
+      }
+    }
+  });
+  resizeObs.observe(termContainer);
 
   termContainer.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -2103,49 +2151,6 @@ async function toggleLogs() {
   panel.classList.remove('hidden');
 }
 
-async function showLogsList() {
-  const logs = await api.getLogs(activeAgentId);
-  allLogs = logs; // Cache for search
-  document.getElementById('logs-search-input').value = '';
-  const listEl = document.getElementById('logs-list');
-  const viewerEl = document.getElementById('log-viewer');
-  const backBtn = document.getElementById('btn-logs-back');
-  const titleEl = document.getElementById('logs-title');
-
-  viewerEl.classList.add('hidden');
-  listEl.classList.remove('hidden');
-  backBtn.classList.add('hidden');
-  titleEl.textContent = 'Session History';
-  listEl.innerHTML = '';
-
-  if (logs.length === 0) {
-    listEl.innerHTML = '<div class="logs-empty"><p>No sessions recorded yet</p></div>';
-    return;
-  }
-
-  for (const log of logs) {
-    const item = document.createElement('div');
-    item.className = 'log-item';
-
-    const date = new Date(log.mtime);
-    const dateStr = date.toLocaleDateString(undefined, {
-      month: 'short', day: 'numeric', year: 'numeric',
-    });
-    const timeStr = date.toLocaleTimeString(undefined, {
-      hour: 'numeric', minute: '2-digit',
-    });
-    const size = formatSize(log.size);
-
-    item.innerHTML = `
-      <div class="log-item-date">${dateStr} at ${timeStr}</div>
-      <div class="log-item-meta"><span>${size}</span></div>
-    `;
-
-    item.addEventListener('click', () => viewLog(log));
-    listEl.appendChild(item);
-  }
-}
-
 let currentLogMarkdown = '';
 
 async function viewLog(log) {
@@ -2161,7 +2166,7 @@ async function viewLog(log) {
   // Render as formatted markdown
   marked.setOptions({ breaks: false, gfm: true });
   const contentEl = document.getElementById('log-content');
-  contentEl.innerHTML = marked.parse(currentLogMarkdown);
+  contentEl.innerHTML = DOMPurify.sanitize(marked.parse(currentLogMarkdown));
 
   listEl.classList.add('hidden');
   viewerEl.classList.remove('hidden');
@@ -2434,15 +2439,15 @@ async function viewCronLog(name, logPath) {
   document.getElementById('crons-log-title').textContent = name;
   document.getElementById('crons-log-content').textContent = content || '(empty)';
 
-  document.getElementById('crons-jobs').style.display = 'none';
-  document.getElementById('crons-history').style.display = 'none';
-  document.getElementById('crons-tabs').style.display = 'none';
+  document.getElementById('crons-jobs').classList.add('hidden');
+  document.getElementById('crons-history').classList.add('hidden');
+  document.getElementById('crons-tabs').classList.add('hidden');
   document.getElementById('crons-log-viewer').classList.remove('hidden');
 }
 
 function closeCronLog() {
   document.getElementById('crons-log-viewer').classList.add('hidden');
-  document.getElementById('crons-tabs').style.display = '';
+  document.getElementById('crons-tabs').classList.remove('hidden');
   switchCronsTab(cronsActiveTab);
 }
 
@@ -2456,12 +2461,12 @@ function switchCronsTab(tab) {
   });
 
   if (tab === 'jobs') {
-    jobsEl.style.display = '';
-    historyEl.style.display = 'none';
+    jobsEl.classList.remove('hidden');
+    historyEl.classList.add('hidden');
     loadCronsList();
   } else {
-    jobsEl.style.display = 'none';
-    historyEl.style.display = '';
+    jobsEl.classList.add('hidden');
+    historyEl.classList.remove('hidden');
     loadCronsHistory();
   }
 }
@@ -3049,7 +3054,7 @@ function toggleHelp() {
 function renderHelpContent() {
   const contentEl = document.getElementById('help-content');
   marked.setOptions({ breaks: false, gfm: true });
-  contentEl.innerHTML = `<div class="help-prose">${marked.parse(HELP_CONTENT)}</div>`;
+  contentEl.innerHTML = `<div class="help-prose">${DOMPurify.sanitize(marked.parse(HELP_CONTENT))}</div>`;
 }
 
 // --- Add Agent Modal ---
@@ -3338,24 +3343,10 @@ async function renderConfigurePanel() {
     if (folder) document.getElementById('cfg-cwd').value = folder;
   });
   agentForm.querySelector('#btn-cfg-save').addEventListener('click', saveConfigureAgent);
-  let deleteArmed = false;
-  let deleteTimeout = null;
   const deleteBtn = agentForm.querySelector('#btn-cfg-delete');
-  deleteBtn.addEventListener('click', () => {
-    if (deleteArmed) {
-      clearTimeout(deleteTimeout);
-      removeAgent(activeAgentId, true);
-      document.getElementById('configure-panel').classList.add('hidden');
-      return;
-    }
-    deleteArmed = true;
-    deleteBtn.classList.add('armed');
-    deleteBtn.textContent = 'Click again to confirm';
-    deleteTimeout = setTimeout(() => {
-      deleteArmed = false;
-      deleteBtn.classList.remove('armed');
-      deleteBtn.textContent = 'Delete Agent';
-    }, 3000);
+  deleteBtn.addEventListener('click', async () => {
+    document.getElementById('configure-panel').classList.add('hidden');
+    await removeAgent(activeAgentId);
   });
 
   // --- Integrations section ---
@@ -3619,10 +3610,8 @@ async function saveConfigureAgent() {
     showToast('All fields are required', 'error');
     return;
   }
-  const agent = config.agents.find(a => a.id === activeAgentId);
-  if (!agent) return;
-  Object.assign(agent, { name, shortName, cwd, command, color: selectedColor });
-  await api.saveConfig(config);
+  const updated = await api.updateAgent(activeAgentId, { name, shortName, cwd, command, color: selectedColor });
+  if (updated) config = updated;
   renderSidebar();
   selectAgent(activeAgentId);
   showToast('Settings saved', 'success');
@@ -3683,17 +3672,7 @@ function toggleSidebar() {
   document.getElementById('sidebar').classList.toggle('collapsed');
   const strip = document.getElementById('workspace-strip');
   if (strip) strip.classList.toggle('hidden');
-  // Re-fit terminal after sidebar width change
-  requestAnimationFrame(() => {
-    if (activeAgentId) {
-      const fitAddon = fitAddons.get(activeAgentId);
-      if (fitAddon) {
-        fitAddon.fit();
-        const terminal = terminals.get(activeAgentId);
-        if (terminal) api.resize(activeAgentId, terminal.cols, terminal.rows);
-      }
-    }
-  });
+  // Terminal re-fit handled by ResizeObserver on terminal-container
 }
 
 document.getElementById('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
@@ -3738,6 +3717,7 @@ document.getElementById('add-agent-cwd').addEventListener('input', () => {
 });
 document.getElementById('btn-close-help').addEventListener('click', () => {
   document.getElementById('help-panel').classList.add('hidden');
+  if (activeAgentId) terminals.get(activeAgentId)?.focus();
 });
 document.getElementById('btn-confirm-cancel').addEventListener('click', () => closeConfirm(false));
 document.getElementById('btn-confirm-ok').addEventListener('click', () => closeConfirm(true));
@@ -3762,7 +3742,7 @@ const COMMANDS = [
   { label: 'Stop Agent', shortcut: [], action: () => armStop() },
   { label: 'Toggle Notepad', shortcut: ['Cmd', 'E'], action: () => toggleNotepad() },
   { label: 'Toggle Reader View', shortcut: ['Cmd', 'D'], action: () => toggleReader() },
-  { label: 'Toggle File Manager', shortcut: ['Cmd', 'F'], action: () => toggleFiles() },
+  { label: 'Toggle File Manager', shortcut: ['Cmd', 'Shift', 'F'], action: () => toggleFiles() },
   { label: 'Toggle Sidebar', shortcut: ['Cmd', 'B'], action: () => toggleSidebar() },
   { label: 'Scheduled Tasks', shortcut: [], action: () => toggleCrons() },
   { label: 'Session History', shortcut: [], action: () => toggleLogs() },
@@ -3996,7 +3976,7 @@ function populateTodoSelects() {
   const curAgent = agentSel.value;
   agentSel.innerHTML = '<option value="">No agent</option>';
   for (const agent of config.agents) {
-    agentSel.innerHTML += `<option value="${agent.id}">${agent.shortName}</option>`;
+    agentSel.innerHTML += `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.shortName)}</option>`;
   }
   agentSel.value = curAgent || '';
 
@@ -4005,7 +3985,7 @@ function populateTodoSelects() {
   const curGoal = goalSel.value;
   goalSel.innerHTML = '<option value="">No goal</option>';
   for (const goal of todosData.goals) {
-    goalSel.innerHTML += `<option value="${goal.id}">${goal.title}</option>`;
+    goalSel.innerHTML += `<option value="${escapeHtml(goal.id)}">${escapeHtml(goal.title)}</option>`;
   }
   goalSel.value = curGoal || '';
 }

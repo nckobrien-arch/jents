@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('api', {
   setAgentField: (id, field, value) => ipcRenderer.invoke('config:set-agent-field', id, field, value),
   addAgent: (agent) => ipcRenderer.invoke('config:add-agent', agent),
   removeAgentConfig: (id) => ipcRenderer.invoke('config:remove-agent', id),
+  reorderAgents: (fromId, toId) => ipcRenderer.invoke('config:reorder-agents', fromId, toId),
+  updateAgent: (id, updates) => ipcRenderer.invoke('config:update-agent', id, updates),
 
   spawn:     (id, opts) => ipcRenderer.invoke('agent:spawn', id, opts),
   kill:      (id) => ipcRenderer.invoke('agent:kill', id),
@@ -70,4 +72,5 @@ contextBridge.exposeInMainWorld('api', {
   onExit:  (cb) => ipcRenderer.on('agent:exit', (_, id, code) => cb(id, code)),
   onFocus: (cb) => ipcRenderer.on('agent:focus', (_, id, wsId) => cb(id, wsId)),
   onInbox: (cb) => ipcRenderer.on('inbox:new', (_, item) => cb(item)),
+  onNotification: (cb) => ipcRenderer.on('agent:notification', (_, id, active) => cb(id, active)),
 });

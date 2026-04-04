@@ -243,11 +243,15 @@ function loadWindowState() {
   } catch { return {}; }
 }
 
+let windowStateTimeout = null;
 function saveWindowState() {
-  if (!mainWindow) return;
-  ensureDir(USER_DATA_DIR);
-  const bounds = mainWindow.getBounds();
-  fs.writeFileSync(path.join(USER_DATA_DIR, 'window-state.json'), JSON.stringify(bounds));
+  clearTimeout(windowStateTimeout);
+  windowStateTimeout = setTimeout(() => {
+    if (!mainWindow) return;
+    ensureDir(USER_DATA_DIR);
+    const bounds = mainWindow.getBounds();
+    fs.writeFileSync(path.join(USER_DATA_DIR, 'window-state.json'), JSON.stringify(bounds));
+  }, 500);
 }
 
 function createWindow() {
@@ -285,18 +289,48 @@ function createWindow() {
 // --- Notifications ---
 
 let notificationsMuted = false;
+const activeNotifications = new Map(); // agentId -> Notification
+const MAX_NOTIFICATIONS = 4;
 
 function sendNotification(agentId, title, body) {
   if (notificationsMuted) return;
   if (!Notification.isSupported()) return;
 
+  // Close previous notification for this agent
+  const prev = activeNotifications.get(agentId);
+  if (prev) {
+    prev.close();
+    activeNotifications.delete(agentId);
+  }
+
+  // If at max capacity, close the oldest notification
+  if (activeNotifications.size >= MAX_NOTIFICATIONS) {
+    const oldestKey = activeNotifications.keys().next().value;
+    const oldest = activeNotifications.get(oldestKey);
+    if (oldest) oldest.close();
+    activeNotifications.delete(oldestKey);
+    mainWindow?.webContents.send('agent:notification', oldestKey, false);
+  }
+
   const n = new Notification({ title, body, silent: false });
+  activeNotifications.set(agentId, n);
+  mainWindow?.webContents.send('agent:notification', agentId, true);
+
   n.on('click', () => {
     mainWindow?.show();
     mainWindow?.focus();
     const wsId = findWorkspaceForAgent(agentId);
     mainWindow?.webContents.send('agent:focus', agentId, wsId);
+    n.close();
   });
+
+  n.on('close', () => {
+    if (activeNotifications.get(agentId) === n) {
+      activeNotifications.delete(agentId);
+      mainWindow?.webContents.send('agent:notification', agentId, false);
+    }
+  });
+
   n.show();
 }
 
@@ -655,6 +689,30 @@ ipcMain.handle('config:add-agent', (_, newAgent) => {
 ipcMain.handle('config:remove-agent', (_, agentId) => {
   const config = getConfig();
   config.agents = config.agents.filter(a => a.id !== agentId);
+  fs.writeFileSync(getActiveConfigPath(), JSON.stringify(config, null, 2));
+  return config;
+});
+
+ipcMain.handle('config:reorder-agents', (_, fromId, toId) => {
+  const config = getConfig();
+  const fromIdx = config.agents.findIndex(a => a.id === fromId);
+  const toIdx = config.agents.findIndex(a => a.id === toId);
+  if (fromIdx < 0 || toIdx < 0) return config;
+  const [moved] = config.agents.splice(fromIdx, 1);
+  config.agents.splice(toIdx, 0, moved);
+  ensureDir(USER_DATA_DIR);
+  fs.writeFileSync(getActiveConfigPath(), JSON.stringify(config, null, 2));
+  return config;
+});
+
+ipcMain.handle('config:update-agent', (_, agentId, updates) => {
+  const config = getConfig();
+  const agent = config.agents.find(a => a.id === agentId);
+  if (!agent) return null;
+  for (const [key, value] of Object.entries(updates)) {
+    agent[key] = value;
+  }
+  ensureDir(USER_DATA_DIR);
   fs.writeFileSync(getActiveConfigPath(), JSON.stringify(config, null, 2));
   return config;
 });
