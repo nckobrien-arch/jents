@@ -782,6 +782,7 @@
     .feature-group-tag.run { color: var(--green); }
     .feature-group-tag.build { color: var(--accent); }
     .feature-group-tag.work { color: var(--purple); }
+    .feature-group-tag.connect { color: var(--blue); }
 
     .feature-group-text h3 {
       font-size: 32px;
@@ -1056,6 +1057,73 @@
       border-radius: 3px;
       font-family: var(--font-mono);
       font-size: 10px;
+    }
+
+    /* === Connect Visual === */
+    .comms-visual {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 16px;
+      font-size: 10px;
+      height: 100%;
+    }
+    .comms-msg {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+    }
+    .comms-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 8px;
+      font-weight: 800;
+      color: white;
+      flex-shrink: 0;
+    }
+    .comms-body {
+      flex: 1;
+      min-width: 0;
+    }
+    .comms-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 3px;
+    }
+    .comms-name {
+      font-weight: 700;
+      color: var(--text);
+      font-size: 10px;
+    }
+    .comms-tag {
+      font-size: 7px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .comms-text {
+      color: var(--text-secondary);
+      font-size: 9px;
+      line-height: 1.5;
+    }
+    .comms-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      font-size: 14px;
+      padding: 0 4px;
     }
 
     /* === How It Works === */
@@ -1822,7 +1890,7 @@
           <p>Pick a template, name your agent, and go. Jents creates the directory, scaffolds CLAUDE.md with real guidelines, and drops it into your sidebar. Connect MCP integrations and channel plugins with labeled form fields - no JSON editing.</p>
           <ul class="feature-list">
             <li><span class="icon" style="color:var(--accent)">&#9670;</span> 7 role templates with CLAUDE.md and run files auto-generated</li>
-            <li><span class="icon" style="color:var(--accent)">&#9670;</span> 4 starter packs for instant multi-agent teams</li>
+            <li><span class="icon" style="color:var(--accent)">&#9670;</span> 5 starter packs for instant multi-agent teams</li>
             <li><span class="icon" style="color:var(--accent)">&#9670;</span> Import agents from GitHub - paste a URL and it clones + scaffolds</li>
             <li><span class="icon" style="color:var(--accent)">&#9670;</span> Integration library: Slack, GitHub, PostgreSQL, Google Workspace, and more</li>
             <li><span class="icon" style="color:var(--accent)">&#9670;</span> Channel plugins: iMessage, Telegram - toggle on per agent</li>
@@ -1966,6 +2034,69 @@
                     &#8226; Two new contracts signed Tue
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- GROUP D: CONNECT -->
+      <div class="feature-group fade-up">
+        <div class="feature-group-text">
+          <div class="feature-group-tag connect" style="color:var(--blue)">Connect</div>
+          <h3>Agents that talk to each other</h3>
+          <p>Every agent gets a built-in Jents MCP server with tools for messaging, task delegation, and status checks. One agent can hand off work to another - and Jents auto-starts the target if it's not running.</p>
+          <ul class="feature-list">
+            <li><span class="icon" style="color:var(--blue)">&#9670;</span> Built-in MCP server per agent - no setup, no config</li>
+            <li><span class="icon" style="color:var(--blue)">&#9670;</span> send_message for FYI updates between agents</li>
+            <li><span class="icon" style="color:var(--blue)">&#9670;</span> delegate_task sends work + context, returns results automatically</li>
+            <li><span class="icon" style="color:var(--blue)">&#9670;</span> Auto-start: dormant agents wake up when they receive a task</li>
+            <li><span class="icon" style="color:var(--blue)">&#9670;</span> Agents see the full roster - they know who to ask for what</li>
+            <li><span class="icon" style="color:var(--blue)">&#9670;</span> File-based mailboxes - no server, no sockets, fully inspectable</li>
+          </ul>
+        </div>
+        <div class="feature-visual">
+          <div class="comms-visual">
+            <!-- PM delegates to analyst -->
+            <div class="comms-msg">
+              <div class="comms-avatar" style="background:#a06bef">PM</div>
+              <div class="comms-body">
+                <div class="comms-header">
+                  <span class="comms-name">Product Manager</span>
+                  <span class="comms-tag" style="background:rgba(96,165,250,0.15);color:var(--blue)">delegate_task</span>
+                  <span style="font-size:8px;color:var(--text-dim);margin-left:auto">&#8594; Analyst</span>
+                </div>
+                <div class="comms-text">Pull last 30 days of conversion data by channel. Break out paid vs organic and flag anything that dropped more than 15%.</div>
+              </div>
+            </div>
+            <!-- Analyst auto-starts -->
+            <div style="display:flex;align-items:center;gap:8px;padding:0 12px">
+              <div style="flex:1;height:1px;background:var(--border)"></div>
+              <span style="font-size:8px;color:var(--blue);font-weight:600;white-space:nowrap;display:flex;align-items:center;gap:4px"><span style="width:6px;height:6px;border-radius:50%;background:var(--blue);display:inline-block"></span> Analyst auto-started</span>
+              <div style="flex:1;height:1px;background:var(--border)"></div>
+            </div>
+            <!-- Analyst completes task -->
+            <div class="comms-msg">
+              <div class="comms-avatar" style="background:#5b8def">ANL</div>
+              <div class="comms-body">
+                <div class="comms-header">
+                  <span class="comms-name">Data Analyst</span>
+                  <span class="comms-tag" style="background:rgba(52,211,153,0.15);color:var(--green)">complete_task</span>
+                  <span style="font-size:8px;color:var(--text-dim);margin-left:auto">&#8594; PM</span>
+                </div>
+                <div class="comms-text">Done. Paid search down 22% - flagged. Organic steady. Full breakdown saved to output/channel-analysis.md</div>
+              </div>
+            </div>
+            <!-- Writer sends FYI -->
+            <div class="comms-msg" style="opacity:0.7">
+              <div class="comms-avatar" style="background:#6befa0">WRT</div>
+              <div class="comms-body">
+                <div class="comms-header">
+                  <span class="comms-name">Writer</span>
+                  <span class="comms-tag" style="background:rgba(255,255,255,0.06);color:var(--text-dim)">send_message</span>
+                  <span style="font-size:8px;color:var(--text-dim);margin-left:auto">&#8594; PM</span>
+                </div>
+                <div class="comms-text">Blog draft is ready for review in drafts/q2-launch.md</div>
               </div>
             </div>
           </div>

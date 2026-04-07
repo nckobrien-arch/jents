@@ -2912,6 +2912,16 @@ const STARTER_PACKS = [
       { template: 'devops', name: 'DevOps', color: '#ef6b6b' },
     ],
   },
+  {
+    id: 'marketing',
+    name: 'Marketing Team',
+    desc: 'Campaigns, content, and performance analytics',
+    agents: [
+      { template: 'writer', name: 'Copywriter', color: '#6befa0' },
+      { template: 'analyst', name: 'Performance Analyst', color: '#5b8def' },
+      { template: 'pm', name: 'Campaign Manager', color: '#ec4899' },
+    ],
+  },
 ];
 
 // --- Integration Templates ---
