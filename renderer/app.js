@@ -4,9 +4,53 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import TurndownService from 'turndown';
+import { EditorView, keymap } from '@codemirror/view';
+import { EditorState } from '@codemirror/state';
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { syntaxHighlighting, HighlightStyle } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 
 const { api } = window;
+
+// --- CodeMirror Theme ---
+const mdHighlight = HighlightStyle.define([
+  { tag: tags.heading1, color: '#ffffff', fontWeight: '700', fontSize: '1.4em' },
+  { tag: tags.heading2, color: '#ffffff', fontWeight: '650', fontSize: '1.2em' },
+  { tag: tags.heading3, color: '#e8e8f0', fontWeight: '600' },
+  { tag: tags.heading4, color: '#e8e8f0', fontWeight: '600' },
+  { tag: tags.emphasis, color: '#b8b8cc', fontStyle: 'italic' },
+  { tag: tags.strong, color: '#ffffff', fontWeight: '600' },
+  { tag: tags.link, color: '#60a5fa' },
+  { tag: tags.url, color: '#5a5a78' },
+  { tag: tags.monospace, color: '#e2b0ff' },
+  { tag: tags.processingInstruction, color: '#5a5a78' },
+  { tag: tags.quote, color: '#9090aa', fontStyle: 'italic' },
+  { tag: tags.list, color: '#5a5a78' },
+  { tag: tags.meta, color: '#5a5a78' },
+  { tag: tags.contentSeparator, color: '#5a5a78' },
+]);
+
+const mdTheme = EditorView.theme({
+  '&': { backgroundColor: '#0e0918', color: '#d4d4dc' },
+  '.cm-content': {
+    caretColor: '#ff6b3d',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif',
+    fontSize: '15px',
+    lineHeight: '1.75',
+    padding: '32px 0',
+  },
+  '.cm-cursor': { borderLeftColor: '#ff6b3d', borderLeftWidth: '2px' },
+  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': {
+    backgroundColor: 'rgba(255, 107, 61, 0.15) !important',
+  },
+  '.cm-activeLine': { backgroundColor: 'rgba(255, 255, 255, 0.02)' },
+  '.cm-activeLineGutter': { backgroundColor: 'transparent' },
+  '.cm-gutters': { display: 'none' },
+  '.cm-scroller': { padding: '0 40px' },
+  '.cm-line': { maxWidth: '860px' },
+  '&.cm-focused': { outline: 'none' },
+}, { dark: true });
 
 // --- State ---
 let config = null;
@@ -1421,8 +1465,12 @@ function showReaderContent(title, markdown) {
   const contentEl = document.getElementById('reader-content');
   contentEl.innerHTML = `<div class="prose">${html}</div>`;
   contentEl.dataset.rawMarkdown = markdown;
-  contentEl.classList.remove('editing');
   readerEditing = false;
+
+  // Ensure source pane is hidden
+  document.getElementById('reader-source').style.display = 'none';
+  contentEl.style.display = 'block';
+  document.getElementById('reader-mode-toggle').style.display = 'none';
 
   // Reset toolbar buttons
   document.getElementById('reader-title').textContent = title;
@@ -1440,7 +1488,9 @@ function showReaderContent(title, markdown) {
 let readerFilePath = null;
 let readerEditing = false;
 let readerOriginalContent = '';
-let readerInputListenerAttached = false;
+let readerMode = 'preview';
+let cmEditor = null;
+let cmUnsaved = false;
 
 async function openMarkdownFile(filePath) {
   const result = await api.readFile(filePath);
@@ -1450,57 +1500,230 @@ async function openMarkdownFile(filePath) {
   }
   readerFilePath = filePath;
   readerOriginalContent = result.content;
+  readerMode = 'preview';
   showReaderContent(result.name, result.content);
-  // Show edit button for files (not terminal output)
   document.getElementById('btn-reader-edit').style.display = 'flex';
 }
 
-const turndown = new TurndownService({
-  headingStyle: 'atx',
-  codeBlockStyle: 'fenced',
-  bulletListMarker: '-',
-});
+// --- CodeMirror Source Editor ---
+
+function wrapSelection(marker) {
+  return (view) => {
+    const { from, to } = view.state.selection.main;
+    const selected = view.state.sliceDoc(from, to);
+    if (selected.startsWith(marker) && selected.endsWith(marker) && selected.length >= marker.length * 2) {
+      view.dispatch({ changes: { from, to, insert: selected.slice(marker.length, -marker.length) } });
+    } else {
+      view.dispatch({
+        changes: { from, to, insert: marker + selected + marker },
+        selection: { anchor: from + marker.length, head: to + marker.length },
+      });
+    }
+    return true;
+  };
+}
+
+function insertLink(view) {
+  const { from, to } = view.state.selection.main;
+  const selected = view.state.sliceDoc(from, to);
+  const linkText = selected || 'text';
+  const insert = `[${linkText}](url)`;
+  view.dispatch({
+    changes: { from, to, insert },
+    selection: { anchor: from + linkText.length + 3, head: from + linkText.length + 6 },
+  });
+  return true;
+}
+
+function smartListEnter(view) {
+  const { from } = view.state.selection.main;
+  const line = view.state.doc.lineAt(from);
+  const text = line.text;
+
+  // Task list: "  - [ ] text" or "  - [x] text"
+  const taskMatch = text.match(/^(\s*)([-*+])\s\[[ x]\]\s(.*)$/);
+  if (taskMatch) {
+    const [, indent, marker, content] = taskMatch;
+    if (content.trim() === '') {
+      view.dispatch({ changes: { from: line.from, to: line.to, insert: '' } });
+      return true;
+    }
+    view.dispatch({ changes: { from, to: from, insert: `\n${indent}${marker} [ ] ` } });
+    return true;
+  }
+
+  // Ordered list: "  1. text"
+  const orderedMatch = text.match(/^(\s*)(\d+)\.\s(.*)$/);
+  if (orderedMatch) {
+    const [, indent, num, content] = orderedMatch;
+    if (content.trim() === '') {
+      view.dispatch({ changes: { from: line.from, to: line.to, insert: '' } });
+      return true;
+    }
+    const nextNum = parseInt(num) + 1;
+    view.dispatch({ changes: { from, to: from, insert: `\n${indent}${nextNum}. ` } });
+    return true;
+  }
+
+  // Unordered list: "  - text"
+  const unorderedMatch = text.match(/^(\s*)([-*+])\s(.*)$/);
+  if (unorderedMatch) {
+    const [, indent, marker, content] = unorderedMatch;
+    if (content.trim() === '') {
+      view.dispatch({ changes: { from: line.from, to: line.to, insert: '' } });
+      return true;
+    }
+    view.dispatch({ changes: { from, to: from, insert: `\n${indent}${marker} ` } });
+    return true;
+  }
+
+  return false;
+}
+
+function indentListItem(view) {
+  const { from } = view.state.selection.main;
+  const line = view.state.doc.lineAt(from);
+  if (/^\s*([-*+]|\d+\.)\s/.test(line.text)) {
+    view.dispatch({ changes: { from: line.from, to: line.from, insert: '  ' } });
+    return true;
+  }
+  return false;
+}
+
+function dedentListItem(view) {
+  const { from } = view.state.selection.main;
+  const line = view.state.doc.lineAt(from);
+  const leadingMatch = line.text.match(/^(\s+)/);
+  if (leadingMatch && /^\s*([-*+]|\d+\.)\s/.test(line.text)) {
+    const remove = Math.min(2, leadingMatch[1].length);
+    view.dispatch({ changes: { from: line.from, to: line.from + remove } });
+    return true;
+  }
+  return false;
+}
+
+function createOrUpdateEditor(markdownContent) {
+  const parent = document.getElementById('reader-source');
+
+  if (cmEditor) {
+    cmEditor.dispatch({
+      changes: { from: 0, to: cmEditor.state.doc.length, insert: markdownContent },
+    });
+    cmUnsaved = false;
+    return;
+  }
+
+  const startState = EditorState.create({
+    doc: markdownContent,
+    extensions: [
+      history(),
+      keymap.of([
+        { key: 'Mod-b', run: wrapSelection('**') },
+        { key: 'Mod-i', run: wrapSelection('*') },
+        { key: 'Mod-k', run: insertLink },
+        { key: 'Mod-Shift-x', run: wrapSelection('~~') },
+        { key: 'Mod-Shift-c', run: wrapSelection('`') },
+        { key: 'Enter', run: smartListEnter },
+        { key: 'Tab', run: indentListItem },
+        { key: 'Shift-Tab', run: dedentListItem },
+        ...defaultKeymap,
+        ...historyKeymap,
+        indentWithTab,
+      ]),
+      markdown({ base: markdownLanguage }),
+      syntaxHighlighting(mdHighlight),
+      mdTheme,
+      EditorView.lineWrapping,
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          cmUnsaved = true;
+          document.getElementById('reader-title').classList.add('unsaved');
+        }
+      }),
+    ],
+  });
+
+  cmEditor = new EditorView({ state: startState, parent });
+  cmUnsaved = false;
+}
 
 function enterReaderEdit() {
   if (!readerFilePath) return;
   readerEditing = true;
+  readerMode = 'source';
 
-  const contentEl = document.getElementById('reader-content');
-  const proseEl = contentEl.querySelector('.prose');
-  if (proseEl) {
-    proseEl.contentEditable = 'true';
-    proseEl.focus();
-  }
+  createOrUpdateEditor(readerOriginalContent);
 
-  // Track changes (only attach once)
-  if (!readerInputListenerAttached) {
-    contentEl.addEventListener('input', onReaderContentChange);
-    readerInputListenerAttached = true;
-  }
+  document.getElementById('reader-content').style.display = 'none';
+  document.getElementById('reader-source').style.display = 'flex';
 
-  // Swap toolbar buttons
+  document.getElementById('reader-mode-toggle').style.display = 'flex';
   document.getElementById('btn-reader-edit').style.display = 'none';
   document.getElementById('btn-reader-copy').style.display = 'none';
   document.getElementById('btn-reader-copy-slack').style.display = 'none';
   document.getElementById('btn-reader-save').style.display = 'flex';
   document.getElementById('btn-reader-cancel-edit').style.display = 'flex';
 
-  contentEl.classList.add('editing');
+  document.getElementById('btn-mode-source').classList.add('active');
+  document.getElementById('btn-mode-preview').classList.remove('active');
+
+  cmEditor.focus();
 }
 
-function onReaderContentChange() {
-  document.getElementById('reader-title').classList.add('unsaved');
+function switchReaderMode(mode) {
+  if (mode === readerMode) return;
+  readerMode = mode;
+
+  if (mode === 'source') {
+    document.getElementById('reader-content').style.display = 'none';
+    document.getElementById('reader-source').style.display = 'flex';
+    document.getElementById('btn-mode-source').classList.add('active');
+    document.getElementById('btn-mode-preview').classList.remove('active');
+    cmEditor.focus();
+  } else {
+    const currentMarkdown = cmEditor.state.doc.toString();
+    marked.setOptions({ breaks: false, gfm: true });
+    const html = DOMPurify.sanitize(marked.parse(currentMarkdown));
+    const contentEl = document.getElementById('reader-content');
+    contentEl.innerHTML = `<div class="prose">${html}</div>`;
+    contentEl.dataset.rawMarkdown = currentMarkdown;
+    attachCheckboxHandlers(contentEl);
+
+    contentEl.style.display = 'block';
+    document.getElementById('reader-source').style.display = 'none';
+    document.getElementById('btn-mode-source').classList.remove('active');
+    document.getElementById('btn-mode-preview').classList.add('active');
+  }
+}
+
+function attachCheckboxHandlers(contentEl) {
+  if (!readerEditing || !cmEditor) return;
+  const checkboxes = contentEl.querySelectorAll('input[type="checkbox"]');
+  checkboxes.forEach((cb, index) => {
+    cb.disabled = false;
+    cb.addEventListener('change', () => {
+      let md = cmEditor.state.doc.toString();
+      let count = 0;
+      md = md.replace(/\[([ x])\]/g, (match, state) => {
+        if (count === index) {
+          count++;
+          return cb.checked ? '[x]' : '[ ]';
+        }
+        count++;
+        return match;
+      });
+      cmEditor.dispatch({
+        changes: { from: 0, to: cmEditor.state.doc.length, insert: md },
+      });
+      saveReaderEdit();
+    });
+  });
 }
 
 async function saveReaderEdit() {
-  if (!readerFilePath) return;
-  const contentEl = document.getElementById('reader-content');
-  const proseEl = contentEl.querySelector('.prose');
-  if (!proseEl) return;
+  if (!readerFilePath || !cmEditor) return;
 
-  // Convert HTML back to markdown
-  const markdown = turndown.turndown(proseEl.innerHTML);
-
+  const markdown = cmEditor.state.doc.toString();
   const result = await api.writeFile(readerFilePath, markdown);
   if (result.error) {
     showToast('Save failed: ' + result.error, 'error');
@@ -1508,47 +1731,58 @@ async function saveReaderEdit() {
   }
 
   readerOriginalContent = markdown;
-  contentEl.dataset.rawMarkdown = markdown;
+  cmUnsaved = false;
   document.getElementById('reader-title').classList.remove('unsaved');
+
+  // If in preview mode, update the preview
+  if (readerMode === 'preview') {
+    marked.setOptions({ breaks: false, gfm: true });
+    const html = DOMPurify.sanitize(marked.parse(markdown));
+    const contentEl = document.getElementById('reader-content');
+    contentEl.innerHTML = `<div class="prose">${html}</div>`;
+    contentEl.dataset.rawMarkdown = markdown;
+    attachCheckboxHandlers(contentEl);
+  }
+
   showToast('Saved', 'success');
 }
 
 function cancelReaderEdit() {
   readerEditing = false;
+  readerMode = 'preview';
+  cmUnsaved = false;
 
-  const contentEl = document.getElementById('reader-content');
-  contentEl.removeEventListener('input', onReaderContentChange);
-  readerInputListenerAttached = false;
-  contentEl.classList.remove('editing');
+  document.getElementById('reader-source').style.display = 'none';
+  document.getElementById('reader-content').style.display = 'block';
+  document.getElementById('reader-mode-toggle').style.display = 'none';
 
-  // Re-render original content (discard edits)
   marked.setOptions({ breaks: false, gfm: true });
+  const contentEl = document.getElementById('reader-content');
   contentEl.innerHTML = `<div class="prose">${DOMPurify.sanitize(marked.parse(readerOriginalContent))}</div>`;
   contentEl.dataset.rawMarkdown = readerOriginalContent;
 
-  // Restore toolbar buttons
   document.getElementById('btn-reader-edit').style.display = readerFilePath ? 'flex' : 'none';
   document.getElementById('btn-reader-copy').style.display = 'flex';
   document.getElementById('btn-reader-copy-slack').style.display = 'flex';
   document.getElementById('btn-reader-save').style.display = 'none';
   document.getElementById('btn-reader-cancel-edit').style.display = 'none';
-
   document.getElementById('reader-title').classList.remove('unsaved');
 }
 
 function closeReader() {
-  const contentEl = document.getElementById('reader-content');
-  contentEl.removeEventListener('input', onReaderContentChange);
-  readerInputListenerAttached = false;
-  contentEl.classList.remove('editing');
-
   readerOpen = false;
   readerEditing = false;
   readerFilePath = null;
   readerOriginalContent = '';
+  readerMode = 'preview';
+  cmUnsaved = false;
+
   document.getElementById('reader').classList.add('hidden');
+  document.getElementById('reader-source').style.display = 'none';
+  document.getElementById('reader-content').style.display = 'block';
+  document.getElementById('reader-mode-toggle').style.display = 'none';
   document.getElementById('reader-title').classList.remove('unsaved');
-  // Return focus to terminal
+
   if (activeAgentId) {
     const terminal = terminals.get(activeAgentId);
     if (terminal) terminal.focus();
@@ -1561,8 +1795,12 @@ function toggleReader() {
 }
 
 async function copyReaderContent() {
-  const contentEl = document.getElementById('reader-content');
-  const markdown = contentEl.dataset.rawMarkdown || '';
+  let markdown;
+  if (readerEditing && cmEditor) {
+    markdown = cmEditor.state.doc.toString();
+  } else {
+    markdown = document.getElementById('reader-content').dataset.rawMarkdown || '';
+  }
   const btn = document.getElementById('btn-reader-copy');
 
   try {
@@ -1575,8 +1813,16 @@ async function copyReaderContent() {
 }
 
 async function copyForSlack() {
-  const contentEl = document.getElementById('reader-content');
-  const proseEl = contentEl.querySelector('.prose');
+  let proseEl;
+  if (readerEditing && readerMode === 'source' && cmEditor) {
+    const tempDiv = document.createElement('div');
+    tempDiv.className = 'prose';
+    marked.setOptions({ breaks: false, gfm: true });
+    tempDiv.innerHTML = DOMPurify.sanitize(marked.parse(cmEditor.state.doc.toString()));
+    proseEl = tempDiv;
+  } else {
+    proseEl = document.getElementById('reader-content').querySelector('.prose');
+  }
   const btn = document.getElementById('btn-reader-copy-slack');
   if (!proseEl) return;
 
@@ -1593,7 +1839,12 @@ async function copyForSlack() {
   });
 
   const html = clone.innerHTML;
-  const plainText = contentEl.dataset.rawMarkdown || proseEl.innerText;
+  let plainText;
+  if (readerEditing && cmEditor) {
+    plainText = cmEditor.state.doc.toString();
+  } else {
+    plainText = document.getElementById('reader-content').dataset.rawMarkdown || proseEl.innerText;
+  }
 
   try {
     const htmlBlob = new Blob([html], { type: 'text/html' });
@@ -1732,6 +1983,8 @@ function setupEventListeners() {
   document.getElementById('btn-reader-edit').addEventListener('click', enterReaderEdit);
   document.getElementById('btn-reader-save').addEventListener('click', saveReaderEdit);
   document.getElementById('btn-reader-cancel-edit').addEventListener('click', cancelReaderEdit);
+  document.getElementById('btn-mode-source').addEventListener('click', () => switchReaderMode('source'));
+  document.getElementById('btn-mode-preview').addEventListener('click', () => switchReaderMode('preview'));
   document.getElementById('btn-configure').addEventListener('click', toggleConfigure);
   document.getElementById('btn-close-configure').addEventListener('click', () => {
     document.getElementById('configure-panel').classList.add('hidden');
@@ -1952,6 +2205,19 @@ function setupEventListeners() {
     }
 
     if (e.metaKey || e.ctrlKey) {
+      // When CodeMirror editor is focused, let it handle formatting shortcuts
+      if (readerEditing && readerMode === 'source' && cmEditor && cmEditor.hasFocus) {
+        if (['b', 'i', 'k'].includes(e.key) && !e.shiftKey) {
+          return; // Let CodeMirror handle Cmd+B/I/K
+        }
+        // Cmd+/ toggles source/preview
+        if (e.key === '/') {
+          e.preventDefault();
+          switchReaderMode(readerMode === 'source' ? 'preview' : 'source');
+          return;
+        }
+      }
+
       // Cmd+K command palette
       if (e.key === 'k') {
         e.preventDefault();
@@ -2033,6 +2299,13 @@ function setupEventListeners() {
       if (e.key === 'F' && e.shiftKey) {
         e.preventDefault();
         toggleFiles();
+        return;
+      }
+
+      // Cmd+/ toggle source/preview in reader edit mode
+      if (e.key === '/' && readerEditing) {
+        e.preventDefault();
+        switchReaderMode(readerMode === 'source' ? 'preview' : 'source');
         return;
       }
 

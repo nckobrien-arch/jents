@@ -191,6 +191,15 @@
         <div id="reader-toolbar">
           <span id="reader-title">Reader View</span>
           <div id="reader-actions">
+            <!-- Mode toggle (only visible when editing a file) -->
+            <div id="reader-mode-toggle" style="display:none">
+              <button class="toolbar-btn mode-btn active" id="btn-mode-source" title="Source (Cmd+/)">
+                <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              </button>
+              <button class="toolbar-btn mode-btn" id="btn-mode-preview" title="Preview (Cmd+/)">
+                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
             <button class="toolbar-btn" id="btn-reader-edit" title="Edit" style="display:none">
               <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             </button>
@@ -212,6 +221,7 @@
           </div>
         </div>
         <div id="reader-content"></div>
+        <div id="reader-source" style="display:none"></div>
       </div>
     </main>
 

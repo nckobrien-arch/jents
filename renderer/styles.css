@@ -2422,16 +2422,44 @@ html, body {
   margin-left: -24px;
 }
 
-/* === Reader WYSIWYG Editing === */
-#reader-content.editing .prose {
-  outline: none;
-  cursor: text;
-  border-left: 2px solid var(--accent);
-  padding-left: 36px;
+/* === Reader Source Editor (CodeMirror) === */
+#reader-source {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-#reader-content.editing .prose:focus {
-  border-left-color: var(--accent);
+#reader-source .cm-editor {
+  flex: 1;
+  overflow: auto;
+}
+
+/* === Mode Toggle === */
+#reader-mode-toggle {
+  display: flex;
+  gap: 1px;
+  background: var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-right: 8px;
+}
+
+.mode-btn {
+  border-radius: 0 !important;
+  background: var(--bg-surface) !important;
+  opacity: 0.5;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+}
+
+.mode-btn.active {
+  background: var(--bg-active) !important;
+  color: var(--text-bright);
+  opacity: 1;
+}
+
+.mode-btn:hover {
+  opacity: 0.8;
 }
 
 /* Unsaved indicator */
