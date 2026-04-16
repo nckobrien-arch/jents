@@ -1227,6 +1227,8 @@ async function toggleFiles() {
     return;
   }
   closeAllPanels();
+  const searchEl = document.getElementById('files-search');
+  if (searchEl) searchEl.value = '';
   await loadFiles();
   panel.classList.remove('hidden');
 }
@@ -1270,7 +1272,11 @@ async function loadFiles() {
 function renderFiles() {
   const filterEl = document.getElementById('files-agent-filter');
   const filterValue = filterEl.value;
-  const filtered = filterValue === '__all__' ? allFilesCache : allFilesCache.filter(f => f.agentId === filterValue);
+  const searchQuery = (document.getElementById('files-search')?.value || '').toLowerCase();
+  let filtered = filterValue === '__all__' ? allFilesCache : allFilesCache.filter(f => f.agentId === filterValue);
+  if (searchQuery) {
+    filtered = filtered.filter(f => f.name.toLowerCase().includes(searchQuery) || f.relativePath.toLowerCase().includes(searchQuery));
+  }
   const listEl = document.getElementById('files-list');
   listEl.innerHTML = '';
 
@@ -2050,6 +2056,7 @@ function setupEventListeners() {
   });
   document.getElementById('btn-files-refresh').addEventListener('click', loadFiles);
   document.getElementById('files-agent-filter').addEventListener('change', renderFiles);
+  document.getElementById('files-search').addEventListener('input', renderFiles);
 
   // Logs panel
   document.getElementById('btn-close-logs').addEventListener('click', () => {
@@ -2083,22 +2090,6 @@ function setupEventListeners() {
     }
   });
 
-  // Agent-to-agent mail pending - dedupe so we don't toast every 2s poll
-  const mailNotified = new Set();
-  api.onMail((agentId, count) => {
-    if (mailNotified.has(agentId)) return;
-    mailNotified.add(agentId);
-    // Clear after 30s so we re-notify if new mail arrives later
-    setTimeout(() => mailNotified.delete(agentId), 30000);
-
-    const agent = config.agents.find(a => a.id === agentId);
-    const name = agent ? agent.shortName : agentId;
-    showToast(`${name} has ${count} pending message${count > 1 ? 's' : ''}`);
-    if (agentId !== activeAgentId) {
-      hasUnread.set(agentId, true);
-      renderSidebar();
-    }
-  });
 
   // Terminal resize observer - handles window resize, panel open/close, sidebar toggle
   const termContainer = document.getElementById('terminal-container');
@@ -4751,6 +4742,9 @@ async function showLogsWithRuns() {
   const runLogPaths = new Set(runs.map(r => r.logPath));
 
   // Render run records as rich cards
+  // The most recent completed run is the one --continue will resume
+  const mostRecentCompleted = runs.find(r => r.exitCode != null);
+
   for (const run of runs) {
     const agent = config.agents.find(a => a.id === run.agentId);
     const statusIcon = run.exitCode === 0
@@ -4764,18 +4758,39 @@ async function showLogsWithRuns() {
     const timeStr = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     const summaryHtml = run.summary ? `<div class="run-summary">${escapeHtml(truncate(run.summary, 80))}</div>` : '';
     const triggerLabel = run.trigger === 'resume' ? 'resumed' : run.trigger || 'manual';
+    const isCompleted = run.exitCode != null;
+    const isMostRecent = run === mostRecentCompleted;
+    const isCurrentlyRunning = run.exitCode == null;
 
     const card = document.createElement('div');
     card.className = 'run-card';
+
+    // Show resume button on the most recent completed run
+    const resumeBtn = isMostRecent
+      ? '<button class="run-resume-btn" title="Resume this session">Resume</button>'
+      : '';
+
     card.innerHTML = `
       <div class="run-card-header">
         ${statusIcon}
         <span class="run-duration">${duration}</span>
         <span class="run-trigger">${triggerLabel}</span>
+        ${resumeBtn}
       </div>
       ${summaryHtml}
       <div class="run-card-meta">${dateStr} at ${timeStr}</div>
     `;
+
+    // Resume button handler
+    const resumeBtnEl = card.querySelector('.run-resume-btn');
+    if (resumeBtnEl) {
+      resumeBtnEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.getElementById('logs-panel').classList.add('hidden');
+        resumeAgent(activeAgentId);
+      });
+    }
+
     card.addEventListener('click', () => {
       if (run.logPath) {
         const logObj = { path: run.logPath, name: run.logPath.split('/').pop() };
