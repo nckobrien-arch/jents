@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('api', {
   saveNotes: (notes) => ipcRenderer.invoke('notes:save', notes),
   readMcp:  (id) => ipcRenderer.invoke('mcp:read', id),
   writeMcp: (id, config) => ipcRenderer.invoke('mcp:write', id, config),
+  openCodexConfig: () => ipcRenderer.invoke('codex:open-config'),
+  ensureCodexInstructions: (id) => ipcRenderer.invoke('agent:ensure-codex-instructions', id),
   saveBug: (bug) => ipcRenderer.invoke('bugs:save', bug),
   openAgentCwd: (id) => ipcRenderer.invoke('agent:open-cwd', id),
   cloneGithub: (url) => ipcRenderer.invoke('agent:clone-github', url),

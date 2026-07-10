@@ -382,6 +382,7 @@ function resolveCommand(cmd) {
     path.join(os.homedir(), '.local/bin'),
     path.join(os.homedir(), '.npm-global/bin'),
     path.join(os.homedir(), '.bun/bin'),
+    path.join(os.homedir(), 'bin'),
     '/opt/homebrew/bin',
     '/usr/local/bin',
     '/usr/bin',
@@ -391,6 +392,47 @@ function resolveCommand(cmd) {
     if (fs.existsSync(full)) return full;
   }
   return cmd;
+}
+
+// --- Agent runtimes (Claude Code vs Codex CLI) ---
+// Each agent runs on a runtime that determines how launch flags are built.
+// Backward compatible: agents with no `runtime` field are inferred from their command.
+function getRuntimeId(agent) {
+  if (agent.runtime === 'codex' || agent.runtime === 'claude') return agent.runtime;
+  return (agent.command || 'claude').split(' ')[0] === 'codex' ? 'codex' : 'claude';
+}
+
+// Map Jents permission modes to Codex approval/sandbox flags.
+// Codex has no per-mode "accept edits only" granularity, so it maps to workspace-write.
+const CODEX_MODE_FLAGS = {
+  default:           ['-a', 'untrusted'],
+  auto:              ['-a', 'on-request', '-s', 'workspace-write'],
+  acceptEdits:       ['-a', 'on-request', '-s', 'workspace-write'],
+  plan:              ['-a', 'on-request', '-s', 'read-only'],
+  bypassPermissions: ['--dangerously-bypass-approvals-and-sandbox'],
+};
+
+// True if a path exists as a file/dir/symlink (including a broken symlink).
+function pathExists(p) {
+  try { fs.lstatSync(p); return true; } catch { return false; }
+}
+
+// Codex only reads AGENTS.md (never CLAUDE.md). When a Codex agent's directory
+// has a CLAUDE.md but no AGENTS.md, symlink AGENTS.md -> CLAUDE.md so Codex picks
+// up the same instructions from a single source of truth. Idempotent + best-effort.
+// Returns { linked, existed, noSource } for optional UI feedback.
+function ensureCodexInstructions(cwd) {
+  try {
+    const dir = (cwd || '').replace(/^~/, os.homedir());
+    const agentsPath = path.join(dir, 'AGENTS.md');
+    const claudePath = path.join(dir, 'CLAUDE.md');
+    if (pathExists(agentsPath)) return { existed: true };
+    if (!fs.existsSync(claudePath)) return { noSource: true };
+    fs.symlinkSync('CLAUDE.md', agentsPath); // relative target: survives dir moves
+    return { linked: true };
+  } catch {
+    return { error: true };
+  }
 }
 
 function spawnAgent(agentId, opts = {}) {
@@ -413,19 +455,35 @@ function spawnAgent(agentId, opts = {}) {
   const cmdParts = agent.command.split(' ');
   const baseCmd = cmdParts[0];
   const args = cmdParts.slice(1);
+  const runtime = getRuntimeId(agent);
 
-  if (agent.channels && agent.channels.length > 0) {
-    args.push('--channels', ...agent.channels);
-  }
+  if (runtime === 'codex') {
+    // Bridge CLAUDE.md -> AGENTS.md so Codex reads the agent's instructions.
+    ensureCodexInstructions(agent.cwd);
+    // Codex CLI: resume is a subcommand; permission modes map to approval/sandbox flags.
+    if (opts.resume) {
+      // Reattach to the most recent session. Codex reuses the saved session's
+      // policy, so we don't re-apply mode flags here.
+      args.unshift('resume', '--last');
+    } else if (agent.mode && CODEX_MODE_FLAGS[agent.mode]) {
+      args.push(...CODEX_MODE_FLAGS[agent.mode]);
+    }
+    // Note: Codex has no --channels equivalent (channels are a Claude Code plugin feature).
+  } else {
+    // Claude Code
+    if (agent.channels && agent.channels.length > 0) {
+      args.push('--channels', ...agent.channels);
+    }
 
-  // Apply permission mode
-  if (agent.mode && agent.mode !== 'default') {
-    args.push('--permission-mode', agent.mode);
-  }
+    // Apply permission mode
+    if (agent.mode && agent.mode !== 'default') {
+      args.push('--permission-mode', agent.mode);
+    }
 
-  // Resume last session
-  if (opts.resume) {
-    args.push('--continue');
+    // Resume last session
+    if (opts.resume) {
+      args.push('--continue');
+    }
   }
 
 
@@ -902,6 +960,29 @@ ipcMain.handle('mcp:write', (_, agentId, mcpConfig) => {
   return true;
 });
 
+// Ensure a Codex agent has an AGENTS.md (symlinked to CLAUDE.md when present).
+// Called from the renderer right after an agent is created/switched to Codex so
+// the user gets immediate feedback; spawnAgent also calls the helper as a safety net.
+ipcMain.handle('agent:ensure-codex-instructions', (_, agentId) => {
+  const agent = findAgentAcrossWorkspaces(agentId);
+  if (!agent || !agent.cwd) return { error: true };
+  return ensureCodexInstructions(agent.cwd);
+});
+
+// Codex MCP servers live in the global ~/.codex/config.toml. Open it for editing
+// (create an empty file first so the OS has something to open).
+ipcMain.handle('codex:open-config', () => {
+  const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+  try {
+    ensureDir(path.dirname(configPath));
+    if (!fs.existsSync(configPath)) fs.writeFileSync(configPath, '');
+    shell.openPath(configPath);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 ipcMain.handle('dialog:open-folder', async () => {
   const win = BrowserWindow.getFocusedWindow() || mainWindow;
   const result = await dialog.showOpenDialog(win, {
@@ -974,8 +1055,9 @@ ipcMain.handle('agent:clone-github', async (_, url) => {
       });
     }
 
-    // Detect CLAUDE.md
+    // Detect CLAUDE.md / AGENTS.md (the latter implies a Codex agent)
     const hasClaude = fs.existsSync(path.join(targetDir, 'CLAUDE.md'));
+    const hasAgents = fs.existsSync(path.join(targetDir, 'AGENTS.md'));
     // Detect team.json (might define multiple agents)
     const hasTeamJson = fs.existsSync(path.join(targetDir, 'team.json'));
 
@@ -983,6 +1065,7 @@ ipcMain.handle('agent:clone-github', async (_, url) => {
       name: agentName,
       cwd: `~/agents/${agentName}`,
       hasClaude,
+      hasAgents,
       hasTeamJson,
     };
   } catch (err) {

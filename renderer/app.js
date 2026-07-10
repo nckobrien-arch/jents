@@ -225,6 +225,7 @@ async function createStarterPack(pack) {
       shortName,
       cwd,
       command: 'claude',
+      runtime: 'claude',
       color: agentDef.color,
       channels: [],
     };
@@ -1208,6 +1209,33 @@ function sanitizeColor(color) {
   // Allow hex colors, rgb/rgba, hsl/hsla, and CSS variables
   if (/^(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)|var\(--.+\))$/.test(color)) return color;
   return '';
+}
+
+// --- Agent Runtimes (Claude Code vs Codex CLI) ---
+// The runtime determines the launch command, the instruction filename, the
+// install hint, and how integrations are configured. main.js mirrors this and
+// translates permission modes into the right launch flags per runtime.
+const RUNTIMES = {
+  claude: {
+    label: 'Claude Code',
+    command: 'claude',
+    instructionFile: 'CLAUDE.md',
+    install: 'npm install -g @anthropic-ai/claude-code',
+  },
+  codex: {
+    label: 'Codex',
+    command: 'codex',
+    instructionFile: 'AGENTS.md',
+    install: 'npm install -g @openai/codex',
+  },
+};
+
+// Resolve an agent's runtime. Backward compatible: agents saved before this
+// feature have no `runtime` field, so infer it from the command.
+function getRuntimeId(agent) {
+  if (agent && (agent.runtime === 'codex' || agent.runtime === 'claude')) return agent.runtime;
+  const base = (agent && agent.command || 'claude').split(' ')[0];
+  return base === 'codex' ? 'codex' : 'claude';
 }
 
 // --- Permission Modes ---
@@ -2515,11 +2543,12 @@ async function startAgent(agentId, opts = {}) {
     if (!check.found) {
       const terminal = terminals.get(agentId);
       if (terminal) {
+        const runtime = RUNTIMES[getRuntimeId(agent)];
         terminal.writeln('');
         terminal.writeln(`  \x1b[31mCommand not found: ${cmd}\x1b[0m`);
         terminal.writeln(`  \x1b[2mMake sure "${cmd}" is installed and available on your PATH.\x1b[0m`);
-        if (cmd === 'claude') {
-          terminal.writeln(`  \x1b[2mInstall: npm install -g @anthropic-ai/claude-code\x1b[0m`);
+        if (cmd === runtime.command) {
+          terminal.writeln(`  \x1b[2mInstall: ${runtime.install}\x1b[0m`);
         }
         terminal.writeln('');
       }
@@ -3605,7 +3634,17 @@ function openAddAgentModal() {
   const cwdInput = document.getElementById('add-agent-cwd');
   cwdInput.value = '';
   delete cwdInput.dataset.manual;
-  document.getElementById('add-agent-command').value = 'claude';
+  const runtimeSel = document.getElementById('add-agent-runtime');
+  runtimeSel.value = 'claude';
+  document.getElementById('add-agent-command').value = RUNTIMES.claude.command;
+  // Keep the command field in sync with the runtime unless the user has typed a custom command.
+  runtimeSel.onchange = () => {
+    const cmdInput = document.getElementById('add-agent-command');
+    const current = cmdInput.value.trim();
+    if (current === '' || current === RUNTIMES.claude.command || current === RUNTIMES.codex.command) {
+      cmdInput.value = RUNTIMES[runtimeSel.value].command;
+    }
+  };
   selectedColor = PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)];
   selectedTemplate = 'blank';
   renderColorPicker('color-picker', selectedColor);
@@ -3621,7 +3660,8 @@ function closeAddAgentModal() {
 async function confirmAddAgent() {
   const name = document.getElementById('add-agent-name').value.trim();
   const cwd = document.getElementById('add-agent-cwd').value.trim();
-  const command = document.getElementById('add-agent-command').value.trim() || 'claude';
+  const runtime = document.getElementById('add-agent-runtime').value === 'codex' ? 'codex' : 'claude';
+  const command = document.getElementById('add-agent-command').value.trim() || RUNTIMES[runtime].command;
 
   if (!name) {
     showToast('Agent name is required', 'error');
@@ -3667,6 +3707,7 @@ async function confirmAddAgent() {
     shortName,
     cwd: normalizedCwd,
     command,
+    runtime,
     color: selectedColor,
     channels: [],
   };
@@ -3674,14 +3715,18 @@ async function confirmAddAgent() {
   const updated = await api.addAgent(newAgent);
   if (updated) config = updated;
 
-  // Write starter files from template
+  // Write starter files from template, using the runtime's instruction filename.
   const tmpl = SKILL_TEMPLATES.find(t => t.id === selectedTemplate);
   if (tmpl && (tmpl.claudeMd || tmpl.runFiles.length > 0)) {
     const files = [];
-    if (tmpl.claudeMd) files.push({ name: 'CLAUDE.md', content: tmpl.claudeMd });
+    if (tmpl.claudeMd) files.push({ name: RUNTIMES[runtime].instructionFile, content: tmpl.claudeMd });
     for (const rf of tmpl.runFiles) files.push(rf);
     await api.writeStarterFiles(normalizedCwd, files);
   }
+
+  // For a Codex agent whose folder already has a CLAUDE.md (e.g. blank template),
+  // link AGENTS.md -> CLAUDE.md so Codex reads the existing instructions.
+  if (runtime === 'codex') await api.ensureCodexInstructions(id);
 
   // Initialize state
   agentStates.set(id, 'stopped');
@@ -3742,12 +3787,16 @@ async function importFromGithub() {
 
     const color = PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)];
 
+    // Infer runtime from the detected instruction file (AGENTS.md => Codex).
+    const runtime = result.hasAgents && !result.hasClaude ? 'codex' : 'claude';
+
     const newAgent = {
       id,
       name,
       shortName,
       cwd: result.cwd,
-      command: 'claude',
+      command: RUNTIMES[runtime].command,
+      runtime,
       color,
       channels: [],
     };
@@ -3767,6 +3816,7 @@ async function importFromGithub() {
 
     const extras = [];
     if (result.hasClaude) extras.push('CLAUDE.md detected');
+    if (result.hasAgents) extras.push('AGENTS.md detected (Codex)');
     showToast(`${shortName} imported from GitHub${extras.length ? ' - ' + extras.join(', ') : ''}`, 'success');
   } finally {
     btn.textContent = 'Import';
@@ -3795,6 +3845,7 @@ async function renderConfigurePanel() {
   if (!agent) return;
 
   // --- Agent section ---
+  const cfgRuntime = getRuntimeId(agent);
   const agentForm = document.getElementById('config-agent-form');
   agentForm.innerHTML = `
     <div class="form-group">
@@ -3811,6 +3862,13 @@ async function renderConfigurePanel() {
         <input id="cfg-cwd" type="text" value="${escapeHtml(agent.cwd)}" spellcheck="false" />
         <button class="browse-btn" id="btn-cfg-browse" type="button">Browse</button>
       </div>
+    </div>
+    <div class="form-group">
+      <label>Runtime</label>
+      <select id="cfg-runtime">
+        <option value="claude"${cfgRuntime === 'claude' ? ' selected' : ''}>Claude Code</option>
+        <option value="codex"${cfgRuntime === 'codex' ? ' selected' : ''}>Codex</option>
+      </select>
     </div>
     <div class="form-group">
       <label>Command</label>
@@ -3836,22 +3894,48 @@ async function renderConfigurePanel() {
     if (folder) document.getElementById('cfg-cwd').value = folder;
   });
   agentForm.querySelector('#btn-cfg-save').addEventListener('click', saveConfigureAgent);
+  // Switching runtime keeps the command in sync (unless the user set a custom one)
+  // and re-renders the panel so the Integrations/Channels sections reflect the new runtime.
+  agentForm.querySelector('#cfg-runtime').addEventListener('change', (e) => {
+    const cmdInput = document.getElementById('cfg-command');
+    const current = cmdInput.value.trim();
+    if (current === '' || current === RUNTIMES.claude.command || current === RUNTIMES.codex.command) {
+      cmdInput.value = RUNTIMES[e.target.value].command;
+    }
+  });
   const deleteBtn = agentForm.querySelector('#btn-cfg-delete');
   deleteBtn.addEventListener('click', async () => {
     document.getElementById('configure-panel').classList.add('hidden');
     await removeAgent(activeAgentId);
   });
 
-  // --- Integrations section ---
-  configureMcpConfig = await api.readMcp(activeAgentId);
-  renderConfigureIntegrations();
+  // --- Integrations section (runtime-aware) ---
+  // Codex has no per-agent .mcp.json; its MCP servers live in the global config.
+  configureMcpConfig = cfgRuntime === 'codex' ? null : await api.readMcp(activeAgentId);
+  renderConfigureIntegrations(cfgRuntime);
 
   // --- Channels section ---
-  renderConfigureChannels();
+  renderConfigureChannels(cfgRuntime);
 }
 
-function renderConfigureIntegrations() {
+function renderConfigureIntegrations(runtime) {
+  runtime = runtime || getRuntimeId(config.agents.find(a => a.id === activeAgentId) || {});
   const container = document.getElementById('config-integrations');
+
+  if (runtime === 'codex') {
+    // Codex MCP servers are configured globally in ~/.codex/config.toml, not per-agent.
+    container.innerHTML = `
+      <p class="config-empty-hint">Codex MCP servers are configured globally in <code>~/.codex/config.toml</code> (shared by every Codex agent), or via <code>codex mcp add</code>. Per-agent integrations aren't supported by Codex.</p>
+    `;
+    const openBtn = document.createElement('button');
+    openBtn.className = 'config-add-btn';
+    openBtn.type = 'button';
+    openBtn.textContent = 'Open ~/.codex/config.toml';
+    openBtn.addEventListener('click', () => api.openCodexConfig());
+    container.appendChild(openBtn);
+    return;
+  }
+
   const servers = configureMcpConfig && configureMcpConfig.mcpServers ? configureMcpConfig.mcpServers : {};
   const names = Object.keys(servers);
 
@@ -4067,13 +4151,21 @@ function showMcpJsonEditor(name) {
   container.appendChild(actions);
 }
 
-function renderConfigureChannels() {
+function renderConfigureChannels(runtime) {
   if (!activeAgentId) return;
   const agent = config.agents.find(a => a.id === activeAgentId);
   if (!agent) return;
+  runtime = runtime || getRuntimeId(agent);
 
   const container = document.getElementById('config-channels');
   container.innerHTML = '';
+
+  if (runtime === 'codex') {
+    // Channels are delivered via Claude Code plugins (--channels); Codex has no equivalent.
+    container.innerHTML = '<p class="config-empty-hint">Channels are a Claude Code plugin feature and aren\'t available for Codex agents.</p>';
+    return;
+  }
+
   const agentChannels = agent.channels || [];
 
   for (const ch of AVAILABLE_CHANNELS) {
@@ -4100,15 +4192,31 @@ async function saveConfigureAgent() {
   const cwd = document.getElementById('cfg-cwd').value.trim();
   const command = document.getElementById('cfg-command').value.trim();
   const description = document.getElementById('cfg-description').value.trim();
+  const runtime = document.getElementById('cfg-runtime').value === 'codex' ? 'codex' : 'claude';
   if (!name || !shortName || !cwd || !command) {
     showToast('All fields are required', 'error');
     return;
   }
-  const updated = await api.updateAgent(activeAgentId, { name, shortName, cwd, command, description, color: selectedColor });
+  const prevAgent = config.agents.find(a => a.id === activeAgentId);
+  const runtimeChanged = prevAgent && getRuntimeId(prevAgent) !== runtime;
+  const updated = await api.updateAgent(activeAgentId, { name, shortName, cwd, command, description, runtime, color: selectedColor });
   if (updated) config = updated;
   renderSidebar();
   selectAgent(activeAgentId);
-  showToast('Settings saved', 'success');
+  if (runtimeChanged && runtime === 'codex') {
+    const res = await api.ensureCodexInstructions(activeAgentId);
+    if (res && res.linked) {
+      showToast('Switched to Codex - linked AGENTS.md → CLAUDE.md so it reads your instructions.', 'success');
+    } else if (res && res.noSource) {
+      showToast('Switched to Codex. Add an AGENTS.md here - Codex ignores CLAUDE.md.', 'warn');
+    } else {
+      showToast('Switched to Codex. It reads AGENTS.md in this folder.', 'success');
+    }
+  } else if (runtimeChanged) {
+    showToast(`Runtime set to ${RUNTIMES[runtime].label}. This runtime reads ${RUNTIMES[runtime].instructionFile}.`, 'success');
+  } else {
+    showToast('Settings saved', 'success');
+  }
 }
 
 // --- Bug Report ---
