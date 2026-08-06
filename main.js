@@ -279,6 +279,18 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // The app window must never navigate away from the UI (a clicked link in
+  // rendered markdown would otherwise replace the whole app with the page,
+  // with no way back). Route links to the system browser instead.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    e.preventDefault();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
   mainWindow.on('resize', saveWindowState);
   mainWindow.on('move', saveWindowState);
 

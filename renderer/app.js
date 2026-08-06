@@ -131,6 +131,12 @@ const TERMINAL_OPTS = {
   allowProposedApi: true,
   macOptionIsMeta: true,
   drawBoldTextInBrightColors: false,
+  // OSC 8 hyperlinks (gh and other CLIs emit these) open in the system browser
+  linkHandler: {
+    activate: (_event, text) => {
+      if (/^https?:\/\//i.test(text)) api.openExternal(text);
+    },
+  },
 };
 
 // --- Init ---
@@ -880,6 +886,108 @@ function initTerminalForAgent(agent, wrapper) {
         });
       }
       // Only return links that touch the requested line y
+      const relevant = links.filter(l => l.range.start.y <= y && l.range.end.y >= y);
+      callback(relevant.length > 0 ? relevant : undefined);
+    }
+  });
+
+  // Hard-wrapped URL link provider. TUIs like Codex wrap long URLs by writing
+  // real line breaks, which the web-links addon (soft-wrap aware only) never
+  // matches. Re-join adjacent logical lines where one ends in URL text and the
+  // next starts with more of it, and only link matches that cross a break —
+  // single-line URLs stay the addon's job.
+  const URL_RE = /https?:\/\/[-A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%]{4,}/g;
+  const URL_RUN_END = /[-A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%]{3,}$/;
+  const URL_RUN_START = /^( {0,8})([-A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%]{2,})/;
+  const urlTailLooksReal = (t) => /[/.?=&#%-]/.test(t) || t.length >= 8;
+  terminal.registerLinkProvider({
+    provideLinks(y, callback) {
+      const buf = terminal.buffer.active;
+      const chainAt = (anyY) => {
+        let startY = anyY;
+        while (startY > 1) {
+          const line = buf.getLine(startY - 1);
+          if (!line || !line.isWrapped) break;
+          startY--;
+        }
+        const lines = [];
+        let text = '';
+        let endY = startY;
+        for (let ly = startY; ; ly++) {
+          const l = buf.getLine(ly - 1);
+          if (!l) break;
+          if (ly > startY && !l.isWrapped) break;
+          const t = l.translateToString(true);
+          lines.push({ lineY: ly, text: t });
+          text += t;
+          endY = ly;
+        }
+        return { startY, endY, text, lines };
+      };
+      const joinable = (a, b) => {
+        if (!URL_RUN_END.test(a.text)) return false;
+        const m = URL_RUN_START.exec(b.text);
+        return !!m && urlTailLooksReal(m[2]);
+      };
+
+      const chains = [chainAt(y)];
+      for (let hops = 0; hops < 2; hops++) {
+        const top = chains[0];
+        if (top.startY <= 1) break;
+        const prev = chainAt(top.startY - 1);
+        if (!joinable(prev, top)) break;
+        chains.unshift(prev);
+      }
+      for (let hops = 0; hops < 2; hops++) {
+        const bottom = chains[chains.length - 1];
+        if (!buf.getLine(bottom.endY)) break;
+        const next = chainAt(bottom.endY + 1);
+        if (!joinable(bottom, next)) break;
+        chains.push(next);
+      }
+      if (chains.length === 1) { callback(undefined); return; }
+
+      // Flatten to segments, stripping continuation-line indent so the joined
+      // string reads as one unbroken URL candidate
+      const segments = []; // { lineY, offset, colShift }
+      const boundaries = []; // combined-string offsets where a hard break was joined
+      let combined = '';
+      chains.forEach((chain, i) => {
+        let indent = 0;
+        if (i > 0) {
+          boundaries.push(combined.length);
+          indent = URL_RUN_START.exec(chain.text)[1].length;
+        }
+        chain.lines.forEach((ln, j) => {
+          const shift = j === 0 ? indent : 0;
+          segments.push({ lineY: ln.lineY, offset: combined.length, colShift: shift });
+          combined += j === 0 ? ln.text.slice(shift) : ln.text;
+        });
+      });
+
+      const links = [];
+      let m;
+      URL_RE.lastIndex = 0;
+      while ((m = URL_RE.exec(combined)) !== null) {
+        const url = m[0].replace(/[).,;:!?'"\]]+$/, '');
+        const matchStart = m.index;
+        const matchEnd = matchStart + url.length;
+        // Only URLs that actually span a hard break
+        if (!boundaries.some(b => matchStart < b && matchEnd > b)) continue;
+        let startSeg = segments[0], endSeg = segments[0];
+        for (const seg of segments) {
+          if (matchStart >= seg.offset) startSeg = seg;
+          if (matchEnd > seg.offset) endSeg = seg;
+        }
+        links.push({
+          range: {
+            start: { x: matchStart - startSeg.offset + 1 + startSeg.colShift, y: startSeg.lineY },
+            end: { x: matchEnd - endSeg.offset + endSeg.colShift, y: endSeg.lineY },
+          },
+          text: url,
+          activate: (_event, linkText) => api.openExternal(linkText),
+        });
+      }
       const relevant = links.filter(l => l.range.start.y <= y && l.range.end.y >= y);
       callback(relevant.length > 0 ? relevant : undefined);
     }
