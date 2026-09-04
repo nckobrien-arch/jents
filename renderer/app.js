@@ -63,6 +63,8 @@ let runsData = [];
 const terminals = new Map();
 const fitAddons = new Map();
 const searchAddons = new Map();
+const ptySizes = new Map();       // agentId -> {cols, rows} last sent to its pty
+let lastTermDims = null;          // last good grid size, shared by every terminal
 const agentStates = new Map();
 const hasUnread = new Map();
 const agentHasNotification = new Set(); // agents with active desktop notifications
@@ -172,6 +174,7 @@ async function init() {
     const targetAgent = (lastAgent && config.agents.some(a => a.id === lastAgent)) ? lastAgent : config.agents[0].id;
     selectAgent(targetAgent);
     showMainUI();
+    syncTerminalSizes(); // container was display:none until now: nothing measurable
   } else {
     showWelcomeScreen();
   }
@@ -455,6 +458,7 @@ async function switchWorkspace(workspaceId) {
   workspaceUnread.set(workspaceId, false);
 
   // Build agent->workspace mapping and ensure terminals exist
+  const pendingBufferRestores = [];
   for (const agent of config.agents) {
     agentWorkspaceMap.set(agent.id, workspaceId);
     if (!agentStates.has(agent.id)) {
@@ -464,9 +468,11 @@ async function switchWorkspace(workspaceId) {
     }
     if (!terminals.has(agent.id)) {
       createTerminalForAgent(agent);
-      // Restore buffer for agents that were started previously
+      // Restore buffer for agents that were started previously. Deferred until
+      // the terminals are sized: the buffer was written at the pty's width, and
+      // replaying it into a default 80-col grid wraps and overlaps every line.
       const buf = await api.getBuffer(agent.id);
-      if (buf) terminals.get(agent.id).write(buf);
+      if (buf) pendingBufferRestores.push([agent.id, buf]);
     }
   }
 
@@ -479,6 +485,8 @@ async function switchWorkspace(workspaceId) {
     const targetAgent = (last && config.agents.some(a => a.id === last)) ? last : config.agents[0].id;
     selectAgent(targetAgent);
     showMainUI();
+    syncTerminalSizes();
+    for (const [id, buf] of pendingBufferRestores) terminals.get(id)?.write(buf);
   } else {
     activeAgentId = null;
     showWelcomeScreen();
@@ -602,6 +610,7 @@ async function deleteWorkspace(workspaceId) {
       if (terminal) terminal.dispose();
       terminals.delete(agentId);
       fitAddons.delete(agentId);
+      ptySizes.delete(agentId);
       searchAddons.delete(agentId);
       agentStates.delete(agentId);
       hasUnread.delete(agentId);
@@ -1020,6 +1029,34 @@ function initTerminalForAgent(agent, wrapper) {
   }
 }
 
+// --- Terminal Sizing ---
+// Every wrapper is inset:0 in #terminal-container, so all terminals share one
+// geometry. Measure it once from the active terminal (the fit addon reads the
+// parent's computed width, which only exists for a laid-out element) and push
+// that size to every terminal and every running pty. Sizing only the visible
+// agent leaves background agents drawing at a stale width, which is what
+// produces overlapping, half-erased TUI frames.
+function syncTerminalSizes() {
+  const activeFit = fitAddons.get(activeAgentId);
+  const proposed = activeFit && activeFit.proposeDimensions();
+  if (proposed && Number.isFinite(proposed.cols) && Number.isFinite(proposed.rows)) {
+    lastTermDims = { cols: proposed.cols, rows: proposed.rows };
+  }
+  if (!lastTermDims) return;
+  const { cols, rows } = lastTermDims;
+  for (const [id, terminal] of terminals) {
+    if (terminal.cols !== cols || terminal.rows !== rows) {
+      if (id === activeAgentId && activeFit) activeFit.fit();
+      else terminal.resize(cols, rows);
+    }
+    if (agentStates.get(id) !== 'running') continue;
+    const sent = ptySizes.get(id);
+    if (sent && sent.cols === cols && sent.rows === rows) continue;
+    ptySizes.set(id, { cols, rows });
+    api.resize(id, cols, rows);
+  }
+}
+
 // --- Agent Selection ---
 function selectAgent(agentId) {
   const agent = config.agents.find(a => a.id === agentId);
@@ -1053,14 +1090,7 @@ function selectAgent(agentId) {
 
   // Fit and focus terminal
   requestAnimationFrame(() => {
-    const fitAddon = fitAddons.get(agentId);
-    if (fitAddon) {
-      fitAddon.fit();
-      const terminal = terminals.get(agentId);
-      if (terminal && agentStates.get(agentId) === 'running') {
-        api.resize(agentId, terminal.cols, terminal.rows);
-      }
-    }
+    syncTerminalSizes();
     // Focus terminal so keystrokes go directly to it
     const notepadOpen = !document.getElementById('notepad-panel').classList.contains('hidden');
     if (!notepadOpen) {
@@ -1134,6 +1164,7 @@ function setAgentState(agentId, state) {
     clearTimeout(activityTimers.get(agentId));
     activityTimers.delete(agentId);
     workingAgents.delete(agentId);
+    ptySizes.delete(agentId); // next spawn re-sends the size
   }
   if (agentId === activeAgentId) updateStatusUI(agentId);
   paintDot(agentId);
@@ -2343,16 +2374,12 @@ function setupEventListeners() {
 
   // Terminal resize observer - handles window resize, panel open/close, sidebar toggle
   const termContainer = document.getElementById('terminal-container');
+  // Debounced: a window drag fires this every frame, and a burst of pty resizes
+  // makes a TUI redraw against a width that keeps moving underneath it.
+  let resizeTimer = null;
   const resizeObs = new ResizeObserver(() => {
-    if (!activeAgentId) return;
-    const fitAddon = fitAddons.get(activeAgentId);
-    if (fitAddon) {
-      fitAddon.fit();
-      const terminal = terminals.get(activeAgentId);
-      if (terminal && agentStates.get(activeAgentId) === 'running') {
-        api.resize(activeAgentId, terminal.cols, terminal.rows);
-      }
-    }
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(syncTerminalSizes, 80);
   });
   resizeObs.observe(termContainer);
 
@@ -2668,7 +2695,11 @@ async function startAgent(agentId, opts = {}) {
   const terminal = terminals.get(agentId);
   if (terminal) terminal.clear();
 
-  const result = await api.spawn(agentId, opts);
+  // Spawn at the grid the terminal actually has, so the first frame is drawn at
+  // the right width and no SIGWINCH lands mid-boot.
+  syncTerminalSizes();
+  const size = lastTermDims;
+  const result = await api.spawn(agentId, size ? { ...opts, cols: size.cols, rows: size.rows } : opts);
   if (result && result.error) {
     const terminal = terminals.get(agentId);
     if (terminal) {
@@ -2681,15 +2712,9 @@ async function startAgent(agentId, opts = {}) {
     // Show cursor now that agent is running
     if (terminal) terminal.write('\x1b[?25h');
     setAgentState(agentId, 'running');
+    if (size) ptySizes.set(agentId, size);
 
-    requestAnimationFrame(() => {
-      const fitAddon = fitAddons.get(agentId);
-      if (fitAddon) {
-        fitAddon.fit();
-        const term = terminals.get(agentId);
-        if (term) api.resize(agentId, term.cols, term.rows);
-      }
-    });
+    requestAnimationFrame(syncTerminalSizes);
   }
 }
 
@@ -3135,6 +3160,7 @@ async function removeAgent(agentId, skipConfirm = false) {
   if (terminal) terminal.dispose();
   terminals.delete(agentId);
   fitAddons.delete(agentId);
+  ptySizes.delete(agentId);
   searchAddons.delete(agentId);
 
   const wrapper = document.getElementById(`terminal-${agentId}`);
@@ -4550,14 +4576,12 @@ document.getElementById('command-palette-backdrop').addEventListener('click', cl
 // --- Font Size ---
 function changeFontSize(delta) {
   terminalFontSize = Math.max(9, Math.min(24, terminalFontSize + delta));
-  for (const [id, terminal] of terminals) {
+  for (const [, terminal] of terminals) {
     terminal.options.fontSize = terminalFontSize;
-    const fitAddon = fitAddons.get(id);
-    if (fitAddon) fitAddon.fit();
-    if (id === activeAgentId && agentStates.get(id) === 'running') {
-      api.resize(id, terminal.cols, terminal.rows);
-    }
   }
+  // Cell size changes with the font, so re-measure before pushing the new grid
+  // out to every terminal and pty, not just the visible one.
+  requestAnimationFrame(syncTerminalSizes);
 }
 
 function resetFontSize() {

@@ -1970,18 +1970,18 @@ html, body {
   pointer-events: none;
 }
 
+/* Inactive terminals stay laid out (visibility, not display:none) so xterm can
+   measure its cell size and the fit addon can size them. Under display:none a
+   hidden terminal is stuck at 80x24 while its pty runs at a different width. */
 .terminal-wrapper {
   position: absolute;
   inset: 0;
   padding: 4px 8px;
-  display: none;
-  opacity: 0;
-  transition: opacity var(--transition-fast);
+  visibility: hidden;
 }
 
 .terminal-wrapper.active {
-  display: block;
-  opacity: 1;
+  visibility: visible;
 }
 
 /* xterm overrides */

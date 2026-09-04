@@ -509,8 +509,11 @@ function spawnAgent(agentId, opts = {}) {
   try {
     ptyProcess = pty.spawn(resolvedCmd, args, {
       name: 'xterm-256color',
-      cols: 120,
-      rows: 30,
+      // Size from the renderer's actual grid. A fixed 120x30 means the agent
+      // starts drawing at a width its terminal doesn't have, which shows up as
+      // wrapped, overlapping TUI frames until something resizes it.
+      cols: Math.max(20, Math.floor(opts.cols) || 120),
+      rows: Math.max(5, Math.floor(opts.rows) || 30),
       cwd,
       env: {
         ...baseEnv,
